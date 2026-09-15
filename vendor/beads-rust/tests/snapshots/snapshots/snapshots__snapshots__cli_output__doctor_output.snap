@@ -1,0 +1,14 @@
+---
+source: tests/snapshots/cli_output.rs
+expression: normalize_output(&output.stdout)
+---
+br doctor
+OK jsonl.merge_artifacts
+OK sync_jsonl_path: JSONL path is within sync allowlist
+OK sync_conflict_markers: No merge conflict markers found
+OK jsonl.parse: Parsed 0 records
+OK schema.tables
+OK schema.columns
+OK sqlite.integrity_check
+OK counts.db_vs_jsonl: Both have 0 records
+OK sync.metadata: External changes pending import

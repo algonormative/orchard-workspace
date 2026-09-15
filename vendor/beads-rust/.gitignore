@@ -1,0 +1,74 @@
+# Build artifacts (all target directories)
+target/
+target*/
+
+# Cargo lock for library crates (keep for binary crates)
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy Go reference code (not part of Rust project)
+/legacy_beads/
+
+
+# Added by cargo (covered by target*/ above)
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Beads ephemeral files (runtime artifacts, not issues.jsonl)
+.beads/last-touched
+.beads/.bv.lock
+
+# Coverage reports
+/coverage/
+
+# Local agent/session artifacts
+SESSION_STATUS.md
+a.out
+
+# Temp directories and crash reports
+temp_test*/
+rustc-ice-*.txt
+
+# Profiling data
+perf.data
+perf.data.old
+
+# Large source images (webp versions are committed)
+*.png
+
+# Claude Code temp files
+claude-upgrade-progress.json
+
+# Shell command artifacts (from malformed redirects like `> =`)
+=
+
+# Local Cargo and Rustup caches (agent workspace artifacts)
+.cargo/
+.rustup/
+
+# Ephemeral/temporary files (agent workflow artifacts)
+RESEARCH_FINDINGS.md
+TOON_INTEGRATION_BRIEF.md
+cov_*.out
+rustc-ice-*.txt
+*.snap.new
+sweep_*.png
+test_screenshot.png
+
+# Nix build outputs (keep flake.lock - it should be committed)
+result
+result-*
+.direnv/
+
+# Private keys and certificates
+*.pem

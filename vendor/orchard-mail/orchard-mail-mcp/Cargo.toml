@@ -1,0 +1,22 @@
+[package]
+name = "orchard-mail-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Official rmcp Streamable HTTP adapter for Orchard Mail"
+
+[dependencies]
+axum.workspace = true
+http.workspace = true
+orchard-mail-core = { path = "../orchard-mail-core", version = "=0.1.0" }
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile.workspace = true
+tower.workspace = true

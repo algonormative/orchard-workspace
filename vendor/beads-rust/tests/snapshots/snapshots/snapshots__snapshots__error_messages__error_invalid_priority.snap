@@ -1,0 +1,21 @@
+---
+source: tests/snapshots/error_messages.rs
+expression: normalize_output(&output.stderr)
+---
+YYYY-MM-DDTHH:MM:SS DEBUG beads_rust::sync::path: src/sync/path.rs:LINE: Validating sync path path=./.beads/issues.jsonl beads_dir=./.beads
+YYYY-MM-DDTHH:MM:SS DEBUG beads_rust::sync::path: src/sync/path.rs:LINE: Path validated for sync I/O path=./.beads/issues.jsonl
+YYYY-MM-DDTHH:MM:SS DEBUG beads_rust::sync: src/sync/mod.rs:LINE: Import path validated input_path=./.beads/issues.jsonl beads_dir=./.beads allow_external=false
+YYYY-MM-DDTHH:MM:SS DEBUG beads_rust::storage::sqlite: src/storage/sqlite.rs:LINE: Rebuilt blocked issues cache blocked_count=0
+YYYY-MM-DDTHH:MM:SS DEBUG beads_rust::sync: src/sync/mod.rs:LINE: ID-REDACTED completed imported_count=0 jsonl_path=./.beads/issues.jsonl
+{
+  "error": {
+    "code": "INVALID_PRIORITY",
+    "message": "Priority must be 0-4, got: 99",
+    "hint": "Use a priority between 0 (critical) and 4 (backlog)",
+    "retryable": true,
+    "context": {
+      "priority": 99,
+      "hint": "Priority must be 0-4 (0=critical, 4=backlog)."
+    }
+  }
+}

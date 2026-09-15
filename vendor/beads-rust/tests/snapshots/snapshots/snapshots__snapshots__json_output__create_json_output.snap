@@ -1,0 +1,17 @@
+---
+source: tests/snapshots/json_output.rs
+expression: normalize_json(&json)
+---
+{
+  "id": "ISSUE_ID",
+  "title": "New feature request",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "feature",
+  "created_at": "TIMESTAMP",
+  "created_by": "ACTOR",
+  "updated_at": "TIMESTAMP",
+  "source_repo": ".",
+  "compaction_level": 0,
+  "original_size": 0
+}

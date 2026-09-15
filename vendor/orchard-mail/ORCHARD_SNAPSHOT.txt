@@ -1,0 +1,4 @@
+Orchard Mail 0.1.0 local source snapshot
+Commit: 4ea4d304b4c12079cf442af36b2242e45887e10f
+Imported with `git archive` from the reviewed standalone Orchard Mail repository.
+No remote repository URL is claimed for this unpublished snapshot.

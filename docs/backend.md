@@ -1,0 +1,161 @@
+# Orchard workspace host
+
+`orchard-workspace-host` is the reusable process core for the Orchard web
+server and headless tests. One `WorkspaceHost` owns the app data root, every
+open mail repository, every attached task-store command lane, the browser API,
+and all workspace MCP endpoints. Orchard does not start a child mail daemon.
+
+## Process and storage ownership
+
+`WorkspaceHost::open(data_root, br_path)` takes an exclusive advisory lock on
+`data_root/host.lock` for the host lifetime. A second process cannot load stale
+configuration or race port assignment. `config.json` and credentials are
+written atomically. The data root and `credentials/` are owner-only; token
+files are mode `0600` on Unix.
+
+`WorkspaceHost::open_with_port(data_root, br_path, Some(port))` deliberately
+replaces a different persisted port before binding. The CLI uses this for an
+explicit `--port`; passing `None` preserves the normal persisted-port behavior.
+
+The persisted loopback port is allocated once and then reused. Startup binds
+only `127.0.0.1`. If that exact saved port is occupied, startup fails instead
+of silently changing client configuration.
+
+Each workspace has:
+
+- a root and Git-backed `mail/` repository;
+- durable human participant `owner` and system participant `orchard`;
+- an app-owned classic Beads store at `tasks/.beads/` when the reviewed `br`
+  binary is available;
+- optional Git repository references and attached task stores, stored as
+  canonical-path metadata only.
+
+Repository attachment uses `git2`; Orchard never runs an external `git`
+command and never commits attached code. Archiving retains all files and
+metadata while immediately removing the workspace endpoint and write access.
+Missing repositories and stores appear as explicit snapshot errors.
+
+## Rust interface
+
+```rust
+let host = Arc::new(WorkspaceHost::open(data_root, br_path)?);
+let server = host.clone().start_server_with_ui(static_router).await?;
+let value = host.call("workspace_list", json!({}))?;
+```
+
+`start_server()` starts the same API without a static UI router. `ServerHandle`
+reports its socket address and performs cancellation plus a bounded three
+second drain on shutdown. `owner_bootstrap()` is for the local executable only:
+it returns the endpoint and owner credential path/value so the CLI can print a
+copyable login bootstrap. It is not exposed through browser or MCP calls.
+
+Direct host operations are an allowlist:
+
+| Operation | Arguments |
+| --- | --- |
+| `workspace_list` | `{}` |
+| `workspace_create` | `{name, root?, owner_name?}` |
+| `workspace_archive` | `{workspace_id}` |
+| `workspace_snapshot` | `{workspace_id, history_limit?}` |
+| `workspace_info` | `{workspace_id}`; sanitized and also available to that workspace's MCP clients |
+| `connection_info` | `{workspace_id}`; direct call only, returns that workspace's MCP endpoint and token |
+| `rotate_token` | `{workspace_id}` |
+| `repository_attach` / `repository_detach` | `{workspace_id, path}` / `{workspace_id, repository_id}` |
+| `task_store_attach` / `task_store_detach` | `{workspace_id, path}` / `{workspace_id, store_id}` |
+| `tasks_list` | `{workspace_id, store_id, status?}` |
+| `task_show` | `{workspace_id, store_id, task_id}` |
+| `task_create` | `{workspace_id, store_id, request_id, title, description?, priority?, labels?}` |
+| `task_update` | `{workspace_id, store_id, task_id, request_id, title?, description?, status?, priority?, add_labels?, remove_labels?}` |
+| `task_close` | `{workspace_id, store_id, task_id, request_id, reason?}` |
+| `task_dependencies` | `{workspace_id, store_id, task_id}`; read-only in this release |
+| `settings_get` | `{}`; visible JSON without credentials |
+
+All eleven `mail_*` operations from Orchard Mail are also accepted directly
+with `workspace_id` added to their normal arguments. `workspace_id` is stripped
+before the shared `MailService` call. Task responses always carry a qualified
+`task_ref: {store_id, task_id}`, because different stores may contain the same
+task ID.
+
+`workspace_snapshot` has one stable flattened shape:
+
+```json
+{
+  "workspace": {"id": "...", "repositories": [], "task_stores": []},
+  "mail": {"participants": [], "channels": [], "history": []},
+  "repositories": [],
+  "task_stores": [{"store": {}, "tasks": []}],
+  "errors": []
+}
+```
+
+Mail history requests use `latest: true`, so a busy workspace returns its
+newest bounded activity rather than freezing at the first 200 messages.
+
+## Browser and MCP authentication
+
+The executable supplies an embedded static router to
+`start_server_with_ui`. The host owns these same-origin API routes:
+
+- `GET /api/session` returns `{"authenticated": bool}`.
+- `POST /api/session` accepts JSON `{"token": "..."}` and sets a random,
+  in-memory, host-only `orchard_session` cookie with `HttpOnly`,
+  `SameSite=Strict`, and `Path=/api`.
+- `DELETE /api/session` clears the session and cookie.
+- `POST /api/call` accepts `{"operation": "...", "args": {}}` and returns
+  `{"result": ...}` or `{"error": "..."}`.
+
+Every POST and DELETE requires the exact origin
+`http://127.0.0.1:<persisted-port>`; missing and foreign origins are rejected.
+POST bodies must be JSON and are capped at 1 MiB. There is no permissive CORS.
+Browser sessions disappear on restart. The persistent browser owner credential
+is separate from workspace MCP credentials and is never put in a URL.
+
+Each active workspace serves Streamable HTTP MCP at
+`/workspaces/{workspace_id}/mcp` with its own bearer token. Rotation cancels
+existing router sessions before installing the new token; archive and host
+shutdown also cancel sessions. MCP exposes the mail tools, task operations, and
+sanitized `workspace_info`. It does not expose workspace creation/archive,
+attachments, token rotation, `connection_info`, or browser credentials.
+
+## Beads safety and retries
+
+The reviewed helper is `br 0.1.14` from source commit
+`beff256b491e20508eab0319b23547ff145cfd04`. The packaged arm64 binary SHA-256
+is `8c1a0024e35535e49cd1ee97cd432f06e28bf623afbac7fcc6c19f7d3c249ba9`.
+The host accepts only schema version 1 with the exact reviewed table/index SQL
+fingerprint. Attachment opens SQLite read-only and completes this check before
+any `br` command. Unknown formats are never imported or migrated.
+
+Commands use argument arrays, never a shell, with a 1.5 second SQLite lock
+timeout, ten second process deadline, and 8 MiB output cap. Operations on one
+canonical database path are serialized even if path aliases or workspace IDs
+differ. The same canonical database cannot be attached to two workspaces.
+External JSONL changes are explicitly imported only after schema validation.
+Mutations check the JSONL watermark again before an explicit `sync
+--flush-only`, so an external writer cannot be silently overwritten.
+
+Task mutations require `request_id`. An immutable mail intent stores a
+fingerprint of the complete semantic request before `br` runs; a result or
+unknown receipt follows. Concurrent identical IDs share a request lock. A
+changed request with a reused ID is rejected. After an uncertain response,
+Orchard inspects the task or create `external_ref`; it records observed state
+without claiming causation, and it never reruns a pending mutation that current
+state cannot prove. Beads remains the only mutable task ledger.
+
+## Backup and restore
+
+With the host stopped, copy the whole app data root. This includes config,
+owner/workspace credentials, mail Git repositories, and app-owned Beads
+SQLite/JSONL files. Preserve file modes, especially credential mode `0600`.
+Restore the copy to the same data-root path before starting Orchard. Attached
+repositories and external task stores are references and must be backed up
+separately; missing references are reported after restore. Relocating the data
+root or rebinding external paths is outside this release's restore contract.
+
+## Source snapshots
+
+`vendor/orchard-mail` carries version `0.1.0` from reviewed local commit
+`4ea4d304b4c12079cf442af36b2242e45887e10f`. `ORCHARD_SNAPSHOT_SHA256SUMS`
+lists every source file. The packaging verifier rejects missing, changed, and
+additional files before it compiles the workspace. The unpublished source has
+no claimed remote repository URL.

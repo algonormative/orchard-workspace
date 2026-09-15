@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/orchard-workspace-host", "crates/orchard-server"]
+default-members = ["crates/orchard-server"]
+exclude = ["vendor/beads-rust", "vendor/orchard-mail"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.94"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

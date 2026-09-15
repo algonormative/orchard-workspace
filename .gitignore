@@ -1,0 +1,8 @@
+/target/
+/vendor/beads-rust/target/
+/ui/dist/
+/ui/node_modules/
+/ui/test-results/
+/ui/playwright-report/
+/dist/
+.DS_Store

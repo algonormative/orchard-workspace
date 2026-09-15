@@ -1,0 +1,17 @@
+ORCHARD BUNDLED BEADS THIRD-PARTY SOFTWARE NOTICES
+
+Generated from vendor/beads-rust/Cargo.lock with cargo-about 0.9.2.
+Regenerate with: cargo about generate --manifest-path vendor/beads-rust/Cargo.toml --no-default-features --frozen --fail --config about.toml -o third-party/BEADS_THIRD_PARTY_LICENSES.txt third-party/about-beads.hbs
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}
