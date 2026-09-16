@@ -35,7 +35,11 @@ test("first launch is calm and exitable", async ({ page }) => {
 test("global tree opens chats, task defaults, artifacts, and tabs", async ({ page }) => {
   await unlock(page);
   const chats = await openTree(page, "Chats");
-  await chats.getByRole("button", { name: "Alice", exact: true }).click();
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await expect(page.locator("#thread").getByRole("link", { name: "https://example.com/docs", exact: true })).toHaveAttribute("rel", "noreferrer");
+  await expect(page.locator("#thread").getByRole("link", { name: "/w/workspace-1/files/fixture-root?path=README.md", exact: true })).toBeVisible();
+  await expect(page.locator("#thread code a")).toHaveCount(0);
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
   await expect(page.locator("#thread")).toContainText("Owner to Alice");
   await expect(page.locator("#thread")).not.toContainText("Agent to agent");
   await openTree(page, "Tasks");
@@ -73,7 +77,7 @@ test("file viewer renders markdown, code, image, safe relative links, and pinned
 });
 
 test("typed attachments and resource links produce navigable backlinks", async ({ page, request }) => {
-  await unlock(page); await openTree(page, "Artifacts");
+  await unlock(page); await request.post("/fixture/delay", { data: { attach: 300 } }); await request.post("/fixture/fail-upload-once"); await openTree(page, "Artifacts");
   await page.getByRole("button", { name: /Fixture artifacts/ }).click();
   await page.getByRole("button", { name: "README.md", exact: true }).click();
   await page.getByRole("button", { name: "Add link", exact: true }).click();
@@ -83,15 +87,24 @@ test("typed attachments and resource links produce navigable backlinks", async (
   await page.getByRole("button", { name: "docs/example.py", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Backlinks", exact: true })).toBeVisible();
   const chats = await openTree(page, "Chats");
-  await chats.getByRole("button", { name: "general", exact: true }).click();
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
   await page.getByLabel("Message").fill("Typed attachment");
-  await page.getByText("Attach", { exact: true }).click();
-  await page.getByLabel("Attachment URL").fill("/w/workspace-1/files/fixture-root?path=README.md");
+  const failedUpload = page.waitForResponse((response) => response.url().endsWith("/api/call") && response.request().postDataJSON().operation === "artifact_upload");
+  await page.locator('input[type="file"]').setInputFiles({ name: "message-note.txt", mimeType: "text/plain", buffer: Buffer.from("fixture attachment\n") });
+  expect((await failedUpload).status()).toBe(503);
+  await expect(page.locator(".attachment-chip")).toContainText("Upload failed");
+  const uploaded = page.waitForResponse((response) => response.url().endsWith("/api/call") && response.request().postDataJSON().operation === "artifact_upload");
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await openTree(page, "Tasks"); await page.getByRole("button", { name: "All tasks", exact: true }).click();
+  expect((await uploaded).ok()).toBeTruthy();
+  await page.getByRole("tab", { name: "#general", exact: true }).click();
+  await expect(page.locator(".attachment-chip")).toContainText("message-note.txt");
+  await expect(page.getByRole("button", { name: "Remove attachment message-note.txt", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Send", exact: true }).click();
   const audit = await (await request.get("/fixture/audit")).json();
   const sent = audit.calls.filter((entry: { operation: string }) => entry.operation === "mail_send").at(-1);
-  expect(sent.args.refs).toEqual([{ type: "resource", resource: { kind: "file", workspace_id: "workspace-1", root_id: "fixture-root", path: "README.md" } }]);
-  await expect(page.locator("#thread").getByRole("button", { name: "README.md", exact: true })).toBeVisible();
+  expect(sent.args.refs).toEqual([{ type: "resource", resource: { kind: "file", workspace_id: "workspace-1", root_id: "fixture-root", path: "message-note.txt", revision: "0123456789abcdef0123456789abcdef01234567" } }]);
+  await expect(page.locator("#thread").getByRole("button", { name: "message-note.txt", exact: true })).toBeVisible();
 });
 
 test("deep permalink survives login and second-workspace switching", async ({ page, request }) => {
@@ -115,9 +128,26 @@ test("deep permalink survives login and second-workspace switching", async ({ pa
   await expect(page.locator("#conversation")).not.toContainText("Second workspace");
 });
 
+test("workspace settings has a canonical reloadable route and opens README in the viewer", async ({ page, request }) => {
+  await unlock(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page).toHaveURL(/\/w\/workspace-1\/settings$/);
+  await expect(page.getByRole("heading", { name: "Workspace settings", exact: true })).toBeVisible();
+  await expect(page.getByText(/2 participants · 2 channels/)).toBeVisible();
+  await expect(page.locator(".settings-section .code-block code").first()).toContainText("workspace workspace-1");
+  await expect(page.locator(".settings-section .code-block code").nth(1)).toContainText("/private/tmp/orchard-fixture-workspaces/workspace-1");
+  await request.post("/fixture/revoke"); await page.reload();
+  await page.getByLabel("Local access key").fill("fixture-access-key"); await page.getByRole("button", { name: "Unlock", exact: true }).click();
+  await expect(page).toHaveURL(/\/w\/workspace-1\/settings$/);
+  await page.getByRole("button", { name: "Open README", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "README.md", exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Workspace settings", exact: true })).toBeVisible();
+});
+
 test("draft, reply, scroll, reconnect, and polling preserve working context", async ({ page, request }) => {
   await unlock(page); await request.post("/fixture/long-history");
-  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "general", exact: true }).click();
+  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
   await page.getByRole("button", { name: "Reply", exact: true }).first().click();
   const composer = page.getByLabel("Message"); await composer.fill("Draft survives reconnect and poll");
   await page.locator("#thread").evaluate((thread) => { thread.scrollTop = 120; });
@@ -140,7 +170,7 @@ test("draft, reply, scroll, reconnect, and polling preserve working context", as
 
 test("pending operations preserve newer input and do not reopen stale views", async ({ page, request }) => {
   await unlock(page); await request.post("/fixture/delay", { data: { send: 300, attach: 300, action: 300 } });
-  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "general", exact: true }).click();
+  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
   const composer = page.getByLabel("Message"); await composer.fill("First submission");
   await page.getByRole("button", { name: "Send", exact: true }).click(); await composer.fill("Newer unsent text");
   await page.waitForTimeout(450); await expect(composer).toHaveValue("Newer unsent text");
@@ -159,7 +189,7 @@ test("responsive code surfaces stay contained and copy exact text", async ({ pag
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:4174" });
   await unlock(page); await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const code = page.locator(".code-block code").first(); await expect(code).not.toHaveText("Not loaded"); const expected = await code.textContent();
+  const code = page.locator(".code-block code").first(); await expect(code).not.toContainText("Loading"); const expected = await code.textContent();
   await page.locator(".code-block").first().getByRole("button", { name: "Copy", exact: true }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(expected);
   const geometry = await page.evaluate(() => ({ viewport: innerWidth, page: document.documentElement.scrollWidth, blocks: [...document.querySelectorAll<HTMLElement>(".code-block pre")].map((node) => ({ client: node.clientWidth, scroll: node.scrollWidth })) }));

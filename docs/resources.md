@@ -65,10 +65,15 @@ ID and reject nested references to another workspace.
 | `resource_get` | `{workspace_id, ref}` | `{resource, links}` |
 | `resource_links` | `{workspace_id, ref}` | `{outgoing, incoming}` |
 | `resource_link` | `{workspace_id, source, target, label?, request_id}` | `{link}` |
-| `artifact_roots` | `{workspace_id}` | `{roots}` |
+| `workspace_intro` | `{workspace_id}` | README descriptor/text, current participants/channels, introduction, and credential-free joining prompt |
+| `workspace_status` | `{workspace_id}` | participant/channel/message/task/root counts, participant records, artifact health, and source errors |
+| `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?}` | `{alerts, next_cursor, has_more}` |
+| `artifact_roots` | `{workspace_id}` | `{roots}` including same-host `path` and `writable` |
 | `artifact_list` | `{workspace_id, root_id, path?, revision?}` | root, entries, and truncation state |
 | `artifact_history` | `{workspace_id, root_id, path}` | changed versions, newest first |
 | `artifact_upload` | `{workspace_id, path, content_base64, request_id}` | committed file descriptor and revision |
+| `artifact_delete` | `{workspace_id, path, request_id}` | deleted path and revision |
+| `artifact_commit` | `{workspace_id, paths, request_id, message?}` | explicitly committed paths and revision |
 
 Ordinary Mail attachments may use
 `{"type":"resource","resource":<ResourceRef>,"label":"…"}`. Existing
@@ -82,7 +87,9 @@ request ID for different arguments is rejected.
 `artifact_roots` always describes the workspace-owned `artifacts` root plus
 each attached Git repository. Root IDs for attached repositories are their
 persisted repository IDs. `exists` reports missing roots without creating
-them.
+them. `path` is an absolute same-host path. `writable` is true only for the
+containment-validated workspace-owned root; attached roots are always
+read-only through Orchard.
 
 Live attached-root browsing uses tracked index entries and working-copy bytes;
 ignored and untracked files are absent. Bare repositories use their current
@@ -101,6 +108,36 @@ commit even after later uploads. A changed payload or path with the same
 request ID is a conflict. If a process stops after writing its receipt but
 before committing, the matching retry completes that bounded transaction.
 Orchard never uploads to or commits an attached repository.
+
+`artifact_commit` lets a same-host agent commit files it wrote directly under
+the owned artifact root. It accepts 1–100 explicit paths and a message of at
+most 200 bytes. The complete staged, unstaged, and untracked status must match
+that exact path set; unrelated changes, symlinks, submodules, protected paths,
+and unsafe Git metadata are rejected. Existing files may be updated, new files
+added, and tracked files deleted. `artifact_delete` removes one tracked regular
+file. Both operations use serialized request receipts, reject changed retries,
+and replay the original revision after restart. Recovery validates pending
+working-copy and index contents before changing the index.
+
+## Agent orientation and alerts
+
+The owned artifact repository begins with a small `README.md` goals, context,
+and MOTD template. Startup seeds it only when the working tree and repository
+history have never contained that path. Orchard preserves an existing,
+modified, or intentionally deleted README. `workspace_intro` reads it without
+side effects and combines it with current participant and channel records;
+README text is untrusted context and never grants credentials or privileges.
+`workspace_info.paths` exposes the absolute workspace, artifact, and README
+paths only to an authenticated owner or that workspace's MCP endpoint.
+
+`workspace_alerts` is a stateless chronological scan. `after` and
+`next_cursor` are Mail sequence numbers, `limit` defaults to 50 and is bounded
+to 1–200, and the cursor advances over scanned non-alert messages too. Alerts
+exclude self-authored posts and report one or more of `direct`, `mention`,
+`broadcast`, `reply`, or opt-in `channel`. Mentions require an exact participant
+identifier boundary and code spans/fences are ignored. Replies follow the
+thread to its authored root. Polling never acknowledges messages; agents call
+`mail_acknowledge` explicitly.
 
 ## HTTP reads
 

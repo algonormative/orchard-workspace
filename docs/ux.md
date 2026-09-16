@@ -15,6 +15,12 @@ conversation's scroll container and preserves a focused draft, reply context,
 and reading position. A direct view shows the owner↔participant exchange; an
 All direct messages view exposes owner-observable agent-to-agent routing with
 sender and recipient attribution. Broadcast is its own readable conversation.
+Channels use `#name` and participants use `@name` everywhere they are displayed;
+those prefixes never change stored identifiers. The paperclip uploads a chosen
+file immediately and keeps its pinned resource reference with the originating
+draft while the user navigates. The resulting filename chip can be retried or
+removed without deleting the uploaded artifact. HTTP(S) and canonical Orchard
+links in prose are safe links, while fenced code remains exact plain text.
 
 Chat, task, agent, artifact, and attachment detail opens only when selected.
 Each canonical resource offers Copy link, Add link, outgoing links, and
@@ -25,10 +31,14 @@ Snapshot source errors and unavailable task stores appear as errors instead of
 empty content. Actions have text labels and errors have text feedback; color is
 supplementary.
 
-Settings exposes a per-workspace endpoint, credential copy actions, and
-credential rotation. It explains that Orchard connects already-running agents:
-the harness must reload its own MCP configuration, register or resume an
-identity, poll its inbox, and acknowledge messages. It does not expose a
+Settings is the canonical `/w/{workspace}/settings` page and survives login,
+reload, browser Back, and direct navigation. It starts with the compact workspace
+introduction, an Open README action into the read-only artifact viewer, and
+separately copyable joining prompt and workspace path. A collapsed Connection
+details section exposes the per-workspace endpoint, credential copy actions,
+and credential rotation. It explains that Orchard connects already-running
+agents: the harness must reload its own MCP configuration, register or resume
+an identity, poll its inbox, and acknowledge messages. It does not expose a
 protocol log dashboard.
 
 All code-like blocks use one shared renderer with text-node content, a visible

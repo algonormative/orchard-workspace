@@ -33,7 +33,10 @@ impl ToolBackend for CombinedBackend {
             "tasks_list" | "workspace_info" | "task_show" | "task_create" | "task_update"
             | "task_close" | "task_dependencies" | "resource_get" | "resource_links"
             | "resource_link" | "artifact_roots" | "artifact_list" | "artifact_history"
-            | "artifact_upload" => call_from_mcp(&self.host, &self.workspace_id, name, args),
+            | "artifact_upload" | "artifact_delete" | "artifact_commit" | "workspace_intro"
+            | "workspace_status" | "workspace_alerts" => {
+                call_from_mcp(&self.host, &self.workspace_id, name, args)
+            }
             _ => self.mail.call(name, args),
         }
     }
@@ -41,6 +44,27 @@ impl ToolBackend for CombinedBackend {
 
 fn resource_tools() -> Vec<ToolDefinition> {
     vec![
+        tool(
+            "workspace_intro",
+            "Read the workspace README, current participant/channel directory, and credential-free joining guidance.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "workspace_status",
+            "Read honest workspace counts, participant registration/contact observations, artifact availability, and errors.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "workspace_alerts",
+            "Poll direct messages, mentions, broadcasts, replies, and optionally all delivered channel messages after a sequence cursor. Retrieval never acknowledges messages.",
+            json!({
+                "type":"object","properties":{
+                    "participant_id":{"type":"string"},"after":{"type":"integer","minimum":0},
+                    "limit":{"type":"integer","minimum":1,"maximum":200},
+                    "include_channel_messages":{"type":"boolean","default":false}
+                },"required":["participant_id"],"additionalProperties":false
+            }),
+        ),
         tool(
             "resource_get",
             "Read one canonical resource and its incoming and outgoing links.",
@@ -91,6 +115,24 @@ fn resource_tools() -> Vec<ToolDefinition> {
                 "type":"object","properties":{
                     "path":{"type":"string"},"content_base64":{"type":"string"},"request_id":{"type":"string"}
                 },"required":["path","content_base64","request_id"],"additionalProperties":false
+            }),
+        ),
+        tool(
+            "artifact_delete",
+            "Delete one tracked regular file from the workspace-owned artifacts repository, preserving Git history. Reuse request_id after a lost response.",
+            json!({
+                "type":"object","properties":{"path":{"type":"string"},"request_id":{"type":"string"}},
+                "required":["path","request_id"],"additionalProperties":false
+            }),
+        ),
+        tool(
+            "artifact_commit",
+            "Commit exactly the listed local regular-file changes or deletions from the workspace-owned artifact directory. Unrelated or staged changes are rejected.",
+            json!({
+                "type":"object","properties":{
+                    "paths":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"string"}},
+                    "request_id":{"type":"string"},"message":{"type":"string","maxLength":200}
+                },"required":["paths","request_id"],"additionalProperties":false
             }),
         ),
     ]

@@ -202,6 +202,7 @@ impl WorkspaceHost {
             .iter()
             .filter(|workspace| !workspace.archived)
         {
+            let _ = resources::seed_workspace_readme(workspace);
             let runtime = load_runtime(&data_root, workspace)?;
             runtimes.insert(workspace.id.clone(), Arc::new(runtime));
             for store in &workspace.task_stores {
@@ -236,6 +237,9 @@ impl WorkspaceHost {
             "workspace_archive" => self.workspace_archive(args),
             "workspace_snapshot" => self.workspace_snapshot(args),
             "workspace_info" => self.workspace_info(args),
+            "workspace_intro" => self.workspace_intro(args),
+            "workspace_status" => self.workspace_status(args),
+            "workspace_alerts" => self.workspace_alerts(args),
             "connection_info" => self.connection_info(args),
             "rotate_token" => self.rotate_token(args),
             "repository_attach" => self.repository_attach(args),
@@ -255,6 +259,8 @@ impl WorkspaceHost {
             "artifact_list" => self.artifact_list(args),
             "artifact_history" => self.artifact_history(args),
             "artifact_upload" => self.artifact_upload(args),
+            "artifact_delete" => self.artifact_delete(args),
+            "artifact_commit" => self.artifact_commit(args),
             "settings_get" => self.settings_get(),
             operation if MAIL_OPERATIONS.contains(&operation) => self.mail_call(operation, args),
             _ => Err(format!("unsupported workspace operation {operation:?}")),
@@ -401,6 +407,7 @@ impl WorkspaceHost {
             mcp_cancellation: Mutex::new(CancellationToken::new()),
         });
         self.initialize_workspace_actors(&runtime, &owner_name)?;
+        resources::seed_workspace_readme(&workspace)?;
 
         {
             let mut config = self.inner.config.lock().unwrap();
@@ -1160,6 +1167,7 @@ impl WorkspaceHost {
         let workspace_id = workspace_id(&args)?;
         self.active_runtime(&workspace_id)?;
         let workspace = self.workspace_config(&workspace_id)?;
+        let artifacts = workspace.root.join("artifacts");
         Ok(json!({
             "workspace": workspace_view(&workspace),
             "owner_participant_id": "owner",
@@ -1170,8 +1178,9 @@ impl WorkspaceHost {
                     json!(["tasks_list","task_show","task_create","task_update","task_close","task_dependencies"])
                 } else { json!([]) },
                 "task_dependencies_mutable": false,
-                "resources": ["resource_get","resource_links","resource_link","artifact_roots","artifact_list","artifact_history","artifact_upload"]
+                "resources": ["resource_get","resource_links","resource_link","workspace_intro","workspace_status","workspace_alerts","artifact_roots","artifact_list","artifact_history","artifact_upload","artifact_delete","artifact_commit"]
             },
+            "paths": {"workspace":workspace.root,"artifacts":artifacts,"readme":artifacts.join("README.md")},
             "task_backend": task_backend_view(&self.inner.beads)
         }))
     }

@@ -56,7 +56,14 @@ try {
   if (!workspace?.id || !store?.id) throw new Error(`workspace_create omitted workspace/store: ${JSON.stringify(created)}`);
   await page.getByLabel("Workspace", { exact: true }).waitFor();
   await page.getByLabel("Workspace", { exact: true }).selectOption(workspace.id);
-  await page.getByRole("button", { name: "general", exact: true }).waitFor();
+  await page.locator("#conversations").getByRole("button", { name: "#general", exact: true }).waitFor();
+  const introResponse = page.waitForResponse((response) => operation(response) === "workspace_intro", { timeout: 15_000 });
+  const infoResponse = page.waitForResponse((response) => operation(response) === "workspace_info", { timeout: 15_000 });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  if (!(await introResponse).ok() || !(await infoResponse).ok()) throw new Error("Workspace introduction did not load.");
+  await page.getByRole("heading", { name: "Workspace settings", exact: true }).waitFor();
+  if (!new URL(page.url()).pathname.endsWith(`/w/${workspace.id}/settings`)) throw new Error(`Settings route is not canonical: ${page.url()}`);
+  await page.getByRole("button", { name: "Back to workspace", exact: true }).first().click();
   await page.screenshot({ path: screenshots.workspace, fullPage: true });
 
   await openGroup(page, "Tasks"); await page.getByRole("button", { name: "All tasks", exact: true }).click();
@@ -70,11 +77,11 @@ try {
   if (updated?.task?.status !== "closed") throw new Error(`task_update did not close task: ${JSON.stringify(updated)}`);
   await page.screenshot({ path: screenshots.task, fullPage: true });
 
-  const chats = await openGroup(page, "Chats"); await chats.getByRole("button", { name: "general", exact: true }).click();
-  await page.getByLabel("Message").fill(`Live attachment ${runId}`); await page.getByText("Attach", { exact: true }).click();
-  const upload = page.getByLabel("Upload attachment"); await upload.setInputFiles({ name: `live-${runId}.txt`, mimeType: "text/plain", buffer: Buffer.from("live attachment\n") });
-  const uploaded = await result(page, "artifact_upload", () => page.getByRole("button", { name: "Upload file", exact: true }).click());
+  const chats = await openGroup(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await page.getByLabel("Message").fill(`Live attachment ${runId}`);
+  const uploaded = await result(page, "artifact_upload", () => page.locator('input[type="file"]').setInputFiles({ name: `live-${runId}.txt`, mimeType: "text/plain", buffer: Buffer.from("live attachment\n") }));
   if (uploaded?.resource?.ref?.kind !== "file" || !uploaded.resource.ref.revision) throw new Error(`artifact_upload omitted pinned file ref: ${JSON.stringify(uploaded)}`);
+  await page.getByRole("button", { name: `Remove attachment live-${runId}.txt`, exact: true }).waitFor();
   const sent = await result(page, "mail_send", () => page.getByRole("button", { name: "Send", exact: true }).click());
   const attached = sent?.message?.refs?.[0]?.resource;
   if (attached?.kind !== "file" || attached.path !== `live-${runId}.txt`) throw new Error(`mail_send lost typed attachment: ${JSON.stringify(sent)}`);

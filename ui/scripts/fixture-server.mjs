@@ -23,10 +23,11 @@ let delaySendMs = 0;
 let delayAttachMs = 0;
 let delayTasksMs = 0;
 let delayActionMs = 0;
+let uploadFailures = 0;
 let resourceLinks = [];
 let tasks = [{ id: "fixture-1", task_id: "fixture-1", title: "Fixture task", status: "open", description: "Fixture task description" }];
 const messages = [
-  { id: "general-1", sender_id: "alice", destination: { kind: "channel", id: "general" }, body: "General fixture message\n```sh\nprintf 'fixture code'\n```", kind: "message" },
+  { id: "general-1", sender_id: "alice", destination: { kind: "channel", id: "general" }, body: "General fixture message\nhttps://example.com/docs and /w/workspace-1/files/fixture-root?path=README.md\n```sh\nprintf 'https://example.com/plain-code'\n```", kind: "message" },
   { id: "direct-1", sender_id: "owner", destination: { kind: "direct", id: "alice" }, body: "Owner to Alice", kind: "message" },
   { id: "direct-2", sender_id: "alice", destination: { kind: "direct", id: "owner" }, body: "Alice to Owner", kind: "message" },
   { id: "direct-3", sender_id: "alice", destination: { kind: "direct", id: "orchard" }, body: "Agent to agent", kind: "decision" },
@@ -44,7 +45,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function resetFixture() {
   created = false; workspaces = []; sessionsValid = true; sourceErrors = []; taskBackendAvailable = true;
   repositories = []; delaySendMs = 0; delayAttachMs = 0; delayTasksMs = 0;
-  delayActionMs = 0; resourceLinks = [];
+  delayActionMs = 0; uploadFailures = 0; resourceLinks = [];
   tasks = [{ id: "fixture-1", task_id: "fixture-1", title: "Fixture task", status: "open", description: "Fixture task description" }];
   calls.splice(0, calls.length);
   messages.splice(5);
@@ -100,6 +101,11 @@ const server = createServer(async (request, response) => {
     if (payload.operation === "workspace_create") { created = true; const createdWorkspace = { id: `workspace-${workspaces.length + 1}`, name: args.name || `Workspace ${workspaces.length + 1}` }; workspaces.push(createdWorkspace); return send(response, 200, { result: { workspace: createdWorkspace } }); }
     if (payload.operation === "workspace_archive") { const selected = workspaces.find((item) => item.id === args.workspace_id) || workspace; workspaces = workspaces.filter((item) => item.id !== args.workspace_id); created = workspaces.length > 0; return send(response, 200, { result: { workspace: { ...selected, archived: true } } }); }
     if (payload.operation === "workspace_snapshot") return send(response, 200, { result: snapshot(args.workspace_id) });
+    if (payload.operation === "workspace_info") return send(response, 200, { result: { workspace: workspaces.find((item) => item.id === args.workspace_id) || workspace, paths: { workspace: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}`, artifacts: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}/artifacts`, readme: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}/artifacts/README.md` } } });
+    if (payload.operation === "workspace_intro") {
+      const ref = { kind: "file", workspace_id: args.workspace_id, root_id: "fixture-root", path: "README.md" };
+      return send(response, 200, { result: { readme: { ref, href: `/w/${encodeURIComponent(args.workspace_id)}/files/fixture-root?path=README.md`, path: "README.md", text: artifactFiles["README.md"].text, exists: true }, participants, channels, introduction: "Fixture collaborators share this workspace through Orchard. Read the README for the working agreement and current context.", joining_prompt: `Use the configured Orchard MCP for workspace ${args.workspace_id}. Call workspace_intro, register or resume your participant, check alerts, and acknowledge inbox messages as you work.` } });
+    }
     if (payload.operation === "resource_get") {
       const ref = args.ref || {}; const kind = ref.kind;
       const descriptor = (title, data) => ({ ref, href: `/w/${encodeURIComponent(args.workspace_id)}/${kind === "channel" ? "channels" : kind === "direct" ? "direct" : kind === "broadcast" ? "broadcast" : `${kind}s`}/${ref.id || ""}`.replace(/\/$/, ""), title, kind, data });
@@ -117,7 +123,7 @@ const server = createServer(async (request, response) => {
     if (payload.operation === "artifact_list") { const path = args.path || ""; const entries = path ? [{ name: "example.py", path: "docs/example.py", kind: "file" }, { name: "module", path: "docs/module", kind: "submodule" }] : [{ name: "README.md", path: "README.md", kind: "file" }, { name: "docs", path: "docs", kind: "directory" }, { name: "image.png", path: "image.png", kind: "file" }, { name: "empty.txt", path: "empty.txt", kind: "file" }]; return send(response, 200, { result: { entries } }); }
     if (payload.operation === "artifact_history") return send(response, 200, { result: { versions: [{ revision: "0123456789abcdef0123456789abcdef01234567", summary: "Fixture version" }] } });
     if (payload.operation === "resource_link") { if (delayActionMs) await sleep(delayActionMs); const link = { source: args.source, target: args.target, label: args.label || "" }; resourceLinks.push(link); return send(response, 200, { result: { link } }); }
-    if (payload.operation === "artifact_upload") return send(response, 200, { result: { resource: { ref: { kind: "file", workspace_id: args.workspace_id, root_id: "fixture-root", path: args.path }, href: `/w/${args.workspace_id}/files/fixture-root?path=${encodeURIComponent(args.path)}`, title: args.path, kind: "file" }, revision: "fixture" } });
+    if (payload.operation === "artifact_upload") { if (delayAttachMs) await sleep(delayAttachMs); if (uploadFailures > 0) { uploadFailures -= 1; return send(response, 503, { error: "Fixture upload failed once" }); } const revision = "0123456789abcdef0123456789abcdef01234567"; artifactFiles[args.path] = { text: Buffer.from(args.content_base64 || "", "base64").toString("utf8"), mime_type: "text/plain", download_url: `/fixture/download/${encodeURIComponent(args.path)}` }; return send(response, 200, { result: { resource: { ref: { kind: "file", workspace_id: args.workspace_id, root_id: "fixture-root", path: args.path, revision }, href: `/w/${args.workspace_id}/files/fixture-root?path=${encodeURIComponent(args.path)}&revision=${revision}`, title: args.path, kind: "file" }, revision } }); }
     if (payload.operation === "repository_attach") {
       if (delayAttachMs) await sleep(delayAttachMs);
       const isPlain = args.path.includes("plain");
@@ -144,6 +150,7 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname === "/fixture/reset" && request.method === "POST") { resetFixture(); return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/delay" && request.method === "POST") { const value = await bodyOf(request); delaySendMs = Number(value.send || 0); delayAttachMs = Number(value.attach || 0); delayTasksMs = Number(value.tasks || 0); delayActionMs = Number(value.action || 0); return send(response, 200, { ok: true }); }
+  if (url.pathname === "/fixture/fail-upload-once" && request.method === "POST") { uploadFailures = 1; return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/revoke" && request.method === "POST") { sessionsValid = false; return send(response, 200, { revoked: true }); }
   if (url.pathname === "/fixture/source-error" && request.method === "POST") { sourceErrors = [{ source: "task_store", error: "Fixture backend is unavailable" }]; return send(response, 200, { errors: sourceErrors }); }
   if (url.pathname === "/fixture/task-backend-down" && request.method === "POST") { taskBackendAvailable = false; return send(response, 200, { available: false }); }

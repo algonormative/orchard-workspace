@@ -137,6 +137,136 @@ fn snapshot_returns_newest_history_after_more_than_two_hundred_messages() {
         )
         .unwrap();
     assert_eq!(resource["resource"]["data"]["message"]["body"], "message-0");
+
+    let empty_alerts = host
+        .call(
+            "workspace_alerts",
+            json!({"workspace_id":workspace_id,"participant_id":"orchard","after":0,"limit":1}),
+        )
+        .unwrap();
+    assert!(empty_alerts["alerts"].as_array().unwrap().is_empty());
+    assert_eq!(empty_alerts["next_cursor"], 205);
+    assert_eq!(empty_alerts["has_more"], false);
+
+    for (request_id, body) in [
+        ("alert-near", "hello @orchardish"),
+        ("alert-code", "`@orchard`"),
+        ("alert-mention", "hello @orchard!"),
+    ] {
+        host.call(
+            "mail_send",
+            json!({"workspace_id":workspace_id,"request_id":request_id,"sender_id":"owner","destination":{"kind":"channel","id":"general"},"body":body}),
+        )
+        .unwrap();
+    }
+    let direct = host
+        .call(
+            "mail_send",
+            json!({"workspace_id":workspace_id,"request_id":"alert-direct","sender_id":"owner","destination":{"kind":"direct","id":"orchard"},"body":"direct"}),
+        )
+        .unwrap();
+    let root_message = host
+        .call(
+            "mail_send",
+            json!({"workspace_id":workspace_id,"request_id":"alert-root","sender_id":"orchard","destination":{"kind":"channel","id":"general"},"body":"root"}),
+        )
+        .unwrap();
+    host.call(
+        "mail_send",
+        json!({"workspace_id":workspace_id,"request_id":"alert-reply","sender_id":"owner","destination":{"kind":"channel","id":"general"},"body":"reply","thread_id":root_message["message"]["id"]}),
+    )
+    .unwrap();
+    host.call(
+        "mail_send",
+        json!({"workspace_id":workspace_id,"request_id":"alert-broadcast","sender_id":"owner","destination":{"kind":"broadcast"},"body":"broadcast"}),
+    )
+    .unwrap();
+    host.call(
+        "mail_send",
+        json!({"workspace_id":workspace_id,"request_id":"alert-channel","sender_id":"owner","destination":{"kind":"channel","id":"general"},"body":"ordinary"}),
+    )
+    .unwrap();
+    let first_alerts = host
+        .call(
+            "workspace_alerts",
+            json!({"workspace_id":workspace_id,"participant_id":"orchard","after":205,"limit":2}),
+        )
+        .unwrap();
+    let first = first_alerts["alerts"].as_array().unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(first[0]["reasons"], json!(["mention"]));
+    assert_eq!(first[1]["reasons"], json!(["direct"]));
+    assert_eq!(first_alerts["has_more"], true);
+    let cursor = first_alerts["next_cursor"].as_u64().unwrap();
+    let remaining = host
+        .call(
+            "workspace_alerts",
+            json!({"workspace_id":workspace_id,"participant_id":"orchard","after":cursor}),
+        )
+        .unwrap();
+    let remaining = remaining["alerts"].as_array().unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining[0]["reasons"], json!(["reply"]));
+    assert_eq!(remaining[1]["reasons"], json!(["broadcast"]));
+    let channel = host
+        .call(
+            "workspace_alerts",
+            json!({"workspace_id":workspace_id,"participant_id":"orchard","after":212,"include_channel_messages":true}),
+        )
+        .unwrap();
+    assert_eq!(channel["alerts"][0]["reasons"], json!(["channel"]));
+    let ack_args = json!({
+        "workspace_id":workspace_id,"request_id":"alert-ack","participant_id":"orchard",
+        "message_ids":[direct["message"]["id"].as_str().unwrap()]
+    });
+    assert_eq!(
+        host.call("mail_acknowledge", ack_args.clone()).unwrap(),
+        host.call("mail_acknowledge", ack_args).unwrap()
+    );
+}
+
+#[test]
+fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let host = WorkspaceHost::open(data_root.clone(), temp.path().join("missing-br")).unwrap();
+    let created = host
+        .call("workspace_create", json!({"name":"Introductions"}))
+        .unwrap();
+    let workspace_id = created["workspace"]["id"].as_str().unwrap().to_owned();
+    let root = PathBuf::from(created["workspace"]["root"].as_str().unwrap());
+    let intro = host
+        .call("workspace_intro", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    assert_eq!(intro["readme"]["exists"], true);
+    assert!(intro["readme"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("## Goals"));
+    assert!(intro["introduction"]
+        .as_str()
+        .unwrap()
+        .contains("Current channels"));
+    assert!(!intro["joining_prompt"].as_str().unwrap().contains("Bearer"));
+    let info = host
+        .call("workspace_info", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    assert_eq!(
+        info["paths"]["readme"],
+        root.join("artifacts/README.md").to_string_lossy().as_ref()
+    );
+    let roots = host
+        .call("artifact_roots", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    assert_eq!(roots["roots"][0]["writable"], true);
+    fs::write(root.join("artifacts/README.md"), "# Human context\n").unwrap();
+    drop(host);
+
+    let reopened = WorkspaceHost::open(data_root, temp.path().join("missing-br")).unwrap();
+    let preserved = reopened
+        .call("workspace_intro", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    assert_eq!(preserved["readme"]["text"], "# Human context\n");
 }
 
 #[test]
@@ -308,6 +438,262 @@ fn owned_artifact_upload_retries_original_revision_and_reads_exact_versions() {
     assert_eq!(replay["resource"]["ref"]["revision"], first_revision);
 }
 
+#[test]
+fn artifact_direct_commit_and_delete_are_scoped_and_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let host = WorkspaceHost::open(data_root.clone(), temp.path().join("missing-br")).unwrap();
+    let created = host
+        .call("workspace_create", json!({"name":"Artifact CRUD"}))
+        .unwrap();
+    let workspace_id = created["workspace"]["id"].as_str().unwrap().to_owned();
+    let root = PathBuf::from(created["workspace"]["root"].as_str().unwrap()).join("artifacts");
+
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/local.txt"), "local one").unwrap();
+    let committed = host
+        .call(
+            "artifact_commit",
+            json!({"workspace_id":workspace_id,"paths":["nested/local.txt"],"request_id":"direct-one","message":"Add local"}),
+        )
+        .unwrap();
+    let direct_revision = committed["revision"].as_str().unwrap().to_owned();
+    assert_eq!(
+        host.call(
+            "resource_get",
+            json!({"workspace_id":workspace_id,"ref":{"kind":"file","workspace_id":workspace_id,"root_id":"artifacts","path":"nested/local.txt"}}),
+        )
+        .unwrap()["resource"]["data"]["text"],
+        "local one"
+    );
+    fs::write(root.join("nested/local.txt"), "local two").unwrap();
+    fs::write(root.join("unrelated.txt"), "unrelated").unwrap();
+    assert!(host
+        .call(
+            "artifact_commit",
+            json!({"workspace_id":workspace_id,"paths":["nested/local.txt"],"request_id":"direct-two"}),
+        )
+        .unwrap_err()
+        .contains("unrelated"));
+    fs::remove_file(root.join("unrelated.txt")).unwrap();
+    host.call(
+        "artifact_commit",
+        json!({"workspace_id":workspace_id,"paths":["nested/local.txt"],"request_id":"direct-two"}),
+    )
+    .unwrap();
+    fs::remove_file(root.join("nested/local.txt")).unwrap();
+    let local_delete = host
+        .call(
+            "artifact_commit",
+            json!({"workspace_id":workspace_id,"paths":["nested/local.txt"],"request_id":"direct-delete"}),
+        )
+        .unwrap();
+    assert_eq!(local_delete["committed"], true);
+
+    let uploaded = host
+        .call(
+            "artifact_upload",
+            json!({
+                "workspace_id":workspace_id,"path":"delete-me.txt","request_id":"delete-upload",
+                "content_base64":base64::engine::general_purpose::STANDARD.encode(b"before delete")
+            }),
+        )
+        .unwrap();
+    let upload_revision = uploaded["revision"].as_str().unwrap().to_owned();
+    let delete_args =
+        json!({"workspace_id":workspace_id,"path":"delete-me.txt","request_id":"delete-one"});
+    let deleted = host.call("artifact_delete", delete_args.clone()).unwrap();
+    let deletion_revision = deleted["revision"].as_str().unwrap().to_owned();
+    host.call(
+        "artifact_upload",
+        json!({
+            "workspace_id":workspace_id,"path":"later.txt","request_id":"later-upload",
+            "content_base64":base64::engine::general_purpose::STANDARD.encode(b"later")
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        host.call("artifact_delete", delete_args.clone()).unwrap()["revision"],
+        deletion_revision
+    );
+    let historical = host
+        .call(
+            "resource_get",
+            json!({"workspace_id":workspace_id,"ref":{"kind":"file","workspace_id":workspace_id,"root_id":"artifacts","path":"delete-me.txt","revision":upload_revision}}),
+        )
+        .unwrap();
+    assert_eq!(historical["resource"]["data"]["text"], "before delete");
+    assert!(host
+        .call(
+            "artifact_delete",
+            json!({"workspace_id":workspace_id,"path":"missing.txt","request_id":"missing-delete"}),
+        )
+        .unwrap_err()
+        .contains("tracked file"));
+    assert!(host
+        .call(
+            "artifact_delete",
+            json!({"workspace_id":workspace_id,"path":"../escape","request_id":"unsafe-delete"}),
+        )
+        .is_err());
+    drop(host);
+
+    let reopened = WorkspaceHost::open(data_root, temp.path().join("missing-br")).unwrap();
+    assert_eq!(
+        reopened.call("artifact_delete", delete_args).unwrap()["revision"],
+        deletion_revision
+    );
+    assert_eq!(
+        reopened
+            .call(
+                "artifact_commit",
+                json!({"workspace_id":workspace_id,"paths":["nested/local.txt"],"request_id":"direct-one","message":"Add local"}),
+            )
+            .unwrap()["revision"],
+        direct_revision
+    );
+}
+
+#[test]
+fn artifact_commit_rejects_changed_staged_retry_without_mutating_index() {
+    let temp = TempDir::new().unwrap();
+    let host =
+        WorkspaceHost::open(temp.path().join("data"), temp.path().join("missing-br")).unwrap();
+    let created = host
+        .call("workspace_create", json!({"name":"Staged recovery"}))
+        .unwrap();
+    let workspace_id = created["workspace"]["id"].as_str().unwrap().to_owned();
+    let root = PathBuf::from(created["workspace"]["root"].as_str().unwrap()).join("artifacts");
+    let path = "staged.txt";
+    fs::write(root.join(path), "base").unwrap();
+    host.call(
+        "artifact_commit",
+        json!({"workspace_id":workspace_id,"paths":[path],"request_id":"staged-base"}),
+    )
+    .unwrap();
+
+    let intended = b"intended retry contents";
+    fs::write(root.join(path), intended).unwrap();
+    let paths = vec![path.to_owned()];
+    let request_fingerprint = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&json!({"paths":paths,"message":"Commit artifact changes"}))
+                .unwrap()
+        )
+    );
+    let receipt_path = root.join(".orchard/requests/staged-retry.json");
+    fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&json!({
+            "operation":"commit",
+            "paths":[path],
+            "request_fingerprint":request_fingerprint,
+            "content_fingerprints":{path:format!("{:x}", Sha256::digest(intended))}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let repo = git2::Repository::open(&root).unwrap();
+    fs::write(root.join(path), "different staged contents").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new(path)).unwrap();
+    index.write().unwrap();
+    let staged_before = index.get_path(Path::new(path), 0).unwrap().id;
+    fs::write(root.join(path), intended).unwrap();
+
+    let error = host
+        .call(
+            "artifact_commit",
+            json!({"workspace_id":workspace_id,"paths":[path],"request_id":"staged-retry"}),
+        )
+        .unwrap_err();
+    assert!(error.contains("staged contents changed"), "{error}");
+    let index = repo.index().unwrap();
+    assert_eq!(
+        index.get_path(Path::new(path), 0).unwrap().id,
+        staged_before
+    );
+    assert_eq!(
+        repo.find_blob(staged_before).unwrap().content(),
+        b"different staged contents"
+    );
+}
+
+#[test]
+fn artifact_delete_rejects_changed_staged_retry_without_mutating_index() {
+    let temp = TempDir::new().unwrap();
+    let host =
+        WorkspaceHost::open(temp.path().join("data"), temp.path().join("missing-br")).unwrap();
+    let created = host
+        .call("workspace_create", json!({"name":"Delete recovery"}))
+        .unwrap();
+    let workspace_id = created["workspace"]["id"].as_str().unwrap().to_owned();
+    let root = PathBuf::from(created["workspace"]["root"].as_str().unwrap()).join("artifacts");
+    let path = "delete-staged.txt";
+    let original = b"original delete contents";
+    fs::write(root.join(path), original).unwrap();
+    host.call(
+        "artifact_commit",
+        json!({"workspace_id":workspace_id,"paths":[path],"request_id":"delete-stage-base"}),
+    )
+    .unwrap();
+
+    let repo = git2::Repository::open(&root).unwrap();
+    let previous_oid = repo
+        .index()
+        .unwrap()
+        .get_path(Path::new(path), 0)
+        .unwrap()
+        .id;
+    fs::write(
+        root.join(".orchard/requests/delete-staged-retry.json"),
+        serde_json::to_vec_pretty(&json!({
+            "operation":"delete","path":path,"previous_oid":previous_oid.to_string()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(root.join(path), "different staged delete contents").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new(path)).unwrap();
+    index.write().unwrap();
+    let staged_before = index.get_path(Path::new(path), 0).unwrap().id;
+    fs::write(root.join(path), original).unwrap();
+
+    let error = host
+        .call(
+            "artifact_delete",
+            json!({"workspace_id":workspace_id,"path":path,"request_id":"delete-staged-retry"}),
+        )
+        .unwrap_err();
+    assert!(error.contains("changed staged contents"), "{error}");
+    let index = repo.index().unwrap();
+    assert_eq!(
+        index.get_path(Path::new(path), 0).unwrap().id,
+        staged_before
+    );
+    assert_eq!(
+        repo.find_blob(staged_before).unwrap().content(),
+        b"different staged delete contents"
+    );
+    assert_eq!(fs::read(root.join(path)).unwrap(), original);
+
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new(path)).unwrap();
+    index.remove_path(Path::new(path)).unwrap();
+    index.write().unwrap();
+    let recovered = host
+        .call(
+            "artifact_delete",
+            json!({"workspace_id":workspace_id,"path":path,"request_id":"delete-staged-retry"}),
+        )
+        .unwrap();
+    assert_eq!(recovered["deleted"], true);
+    assert!(!root.join(path).exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn owned_artifact_upload_rejects_redirected_git_metadata() {
@@ -323,6 +709,7 @@ fn owned_artifact_upload_rejects_redirected_git_metadata() {
     let workspace_root = PathBuf::from(created["workspace"]["root"].as_str().unwrap());
     let artifact_root = workspace_root.join("artifacts");
     let outside = temp.path().join("outside");
+    fs::remove_dir_all(&artifact_root).unwrap();
     fs::create_dir_all(&artifact_root).unwrap();
     git2::Repository::init(&outside).unwrap();
     symlink(outside.join(".git"), artifact_root.join(".git")).unwrap();

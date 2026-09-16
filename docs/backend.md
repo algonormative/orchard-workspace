@@ -64,6 +64,9 @@ Direct host operations are an allowlist:
 | `workspace_archive` | `{workspace_id}` |
 | `workspace_snapshot` | `{workspace_id, history_limit?}` |
 | `workspace_info` | `{workspace_id}`; sanitized and also available to that workspace's MCP clients |
+| `workspace_intro` | `{workspace_id}`; README, current participants/channels, introduction, and joining prompt |
+| `workspace_status` | `{workspace_id}`; counts, participant records, artifact availability, and source errors |
+| `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?}` |
 | `connection_info` | `{workspace_id}`; direct call only, returns that workspace's MCP endpoint and token |
 | `rotate_token` | `{workspace_id}` |
 | `repository_attach` / `repository_detach` | `{workspace_id, path}` / `{workspace_id, repository_id}`; attach returns `{repository, task_store, attached, task_store_attached}` |
@@ -80,6 +83,8 @@ Direct host operations are an allowlist:
 | `artifact_list` | `{workspace_id, root_id, path?, revision?}` |
 | `artifact_history` | `{workspace_id, root_id, path}` |
 | `artifact_upload` | `{workspace_id, path, content_base64, request_id}` |
+| `artifact_delete` | `{workspace_id, path, request_id}`; owned artifacts only |
+| `artifact_commit` | `{workspace_id, paths, request_id, message?}`; exact local-change set in owned artifacts only |
 | `settings_get` | `{}`; visible JSON without credentials |
 
 All eleven `mail_*` operations from Orchard Mail are also accepted directly
@@ -102,6 +107,25 @@ workspace, but cannot be owned by two workspaces. `repository_detach` removes
 the project association while retaining its task store as an external source.
 `task_store_detach` never deletes files, refuses the owned store, and clears any
 project links to the detached source.
+
+`workspace_info` also returns authenticated same-host paths for the workspace,
+owned artifact root, and its `README.md`, plus the available operation names.
+Workspace creation seeds a minimal goals/context/MOTD README in the owned Git
+artifact root. Startup repairs only an interrupted matching seed; it never
+overwrites a user file or resurrects a README that appeared in repository
+history and was later deleted. `workspace_intro` is read-only and dynamically
+adds current participants and channels. `workspace_status` reports source
+errors instead of describing registration contact as active work.
+
+`workspace_alerts` paginates complete Mail history with a stateless sequence
+cursor. It excludes self-authored messages, detects exact mentions outside code,
+follows reply chains to their root author, and includes ordinary channel posts
+only when requested. Scanning does not acknowledge messages. Artifact root
+views expose absolute same-host paths and mark only the validated owned root as
+`writable`; attached repositories remain read-only. Direct commit and delete
+operations accept only explicit owned-artifact paths, require the entire Git
+status to match, and use durable idempotency receipts. See
+[resources.md](resources.md) for bounds and recovery details.
 
 `workspace_snapshot` has one stable flattened shape:
 
@@ -151,7 +175,8 @@ Each active workspace serves Streamable HTTP MCP at
 `/workspaces/{workspace_id}/mcp` with its own bearer token. Rotation cancels
 existing router sessions before installing the new token; archive and host
 shutdown also cancel sessions. MCP exposes the mail tools, task operations, and
-sanitized `workspace_info`, resource tools, and artifact tools. It does not expose workspace creation/archive,
+sanitized `workspace_info`, orientation/status/alert operations, resource
+tools, and artifact tools. It does not expose workspace creation/archive,
 attachments, token rotation, `connection_info`, or browser credentials.
 
 ## Beads safety and retries

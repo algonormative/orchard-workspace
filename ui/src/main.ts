@@ -5,7 +5,8 @@ type Json = Record<string, unknown>;
 type Workspace = { id: string; name: string; archived?: boolean };
 type Store = { id: string; path?: string; name?: string; source?: string };
 type ConversationKind = "channel" | "direct" | "broadcast";
-type Draft = { body: string; reference: string };
+type DraftAttachment = { name: string; requestId: string; status: "uploading" | "ready" | "failed"; file?: File; href?: string; ref?: ResourceRef; error?: string };
+type Draft = { body: string; attachment?: DraftAttachment };
 type DetailView = "form";
 type Screen = "workspace" | "settings" | "new-workspace" | "home";
 type CollectionTab = { kind: "collection"; collection: "tasks" | "agents" | "directs"; workspaceId: string; href: string; title: string };
@@ -120,10 +121,45 @@ function codeBlock(content: string, label = "Copy") {
   return block;
 }
 
+function channelLabel(value: string) { return `#${value.replace(/^#+/, "")}`; }
+function participantLabel(value: string) { return `@${value.replace(/^@+/, "")}`; }
+function introductionSummary(value: string) {
+  const firstSection = value.split(/(?:\r?\n|\s)##\s+/)[0];
+  const plain = firstSection.replace(/^#{1,6}\s*/gm, "").replace(/[`*_]/g, "").replace(/\s+/g, " ").trim();
+  return plain.length > 220 ? `${plain.slice(0, 217).trimEnd()}…` : plain;
+}
+
+function linkifiedText(value: string) {
+  const fragment = document.createDocumentFragment();
+  const pattern = /(?:https?:\/\/[^\s<>]+|\/w\/[^\s<>]+)/g;
+  let offset = 0;
+  for (const match of value.matchAll(pattern)) {
+    const start = match.index || 0;
+    if (start > offset) fragment.append(document.createTextNode(value.slice(offset, start)));
+    let candidate = match[0];
+    let trailing = "";
+    while (/[.,;:!?\])}]/.test(candidate.at(-1) || "")) { trailing = candidate.slice(-1) + trailing; candidate = candidate.slice(0, -1); }
+    const orchard = state.workspace ? parseHref(candidate, state.workspace.id) : undefined;
+    if (orchard) {
+      const link = el("a", "message-link") as HTMLAnchorElement;
+      link.href = canonicalHref(orchard); link.textContent = candidate;
+      link.addEventListener("click", (event) => { event.preventDefault(); void openResource(descriptor(orchard, string(orchard.path) || string(orchard.id) || orchard.kind)); });
+      fragment.append(link);
+    } else {
+      const external = safeLink(candidate);
+      fragment.append(external);
+    }
+    if (trailing) fragment.append(document.createTextNode(trailing));
+    offset = start + match[0].length;
+  }
+  if (offset < value.length) fragment.append(document.createTextNode(value.slice(offset)));
+  return fragment;
+}
+
 function messageBody(body: string) {
   const fragment = document.createDocumentFragment();
   const lines = body.split("\n"); let prose: string[] = []; let code: string[] | undefined; let opener = "";
-  const flushProse = () => { if (prose.length) fragment.append(el("p", "", prose.join("\n"))); prose = []; };
+  const flushProse = () => { if (prose.length) { const paragraph = el("p"); paragraph.append(linkifiedText(prose.join("\n"))); fragment.append(paragraph); } prose = []; };
   for (const line of lines) {
     if (!code && /^```(?:[A-Za-z0-9_+.-]+)?[ \t]*$/.test(line)) { flushProse(); opener = line; code = []; continue; }
     if (code && /^```[ \t]*$/.test(line)) { fragment.append(codeBlock(code.join("\n"))); code = undefined; continue; }
@@ -146,6 +182,12 @@ function navigate(screen: Screen, detailView?: DetailView, replace = false, url?
 
 function workspaceRootHref(workspaceId: string) {
   return canonicalHref({ kind: "broadcast", workspace_id: workspaceId }).replace(/\/broadcast$/, "");
+}
+
+function workspaceSettingsHref(workspaceId: string) { return `${workspaceRootHref(workspaceId)}/settings`; }
+
+function isSettingsLocation(workspaceId: string) {
+  return `${window.location.pathname}${window.location.search}` === workspaceSettingsHref(workspaceId) && !window.location.hash;
 }
 
 function rememberConversationContext() {
@@ -189,7 +231,7 @@ window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "ArrowRight") { event.preventDefault(); cycleTab(1); return; }
   if ((event.metaKey || event.ctrlKey) && event.key === "ArrowLeft") { event.preventDefault(); cycleTab(-1); return; }
   if (event.key !== "Escape") return;
-  if (state.screen === "settings") { navigate("workspace"); renderWorkspace(); return; }
+  if (state.screen === "settings") { openWorkspaceFromSettings(); return; }
   if (state.screen === "new-workspace") { if (state.workspace) { navigate("workspace"); renderWorkspace(); } else renderCalmHome(); return; }
   if (state.detailView === "form") { const target = state.formReturn; state.formReturn = undefined; state.detailView = undefined; if (target) void activateTab(target, true); else renderEmptyViewer(); return; }
 });
@@ -310,7 +352,8 @@ async function initialize() {
       document.querySelector(".welcome")?.append(button("Open available workspace", () => void chooseWorkspace(state.workspaces[0].id, false, true), "primary"));
       return;
     }
-    await chooseWorkspace(requestedWorkspace?.id || state.workspaces[0].id, false, true);
+    const selectedId = requestedWorkspace?.id || state.workspaces[0].id;
+    await chooseWorkspace(selectedId, false, true, isSettingsLocation(selectedId) ? "settings" : "workspace");
   } catch (error) {
     shell("Orchard is unavailable", "The local workspace service did not respond. Check the connection details in Settings, then try again.");
     const retry = button("Try again", () => void initialize());
@@ -433,10 +476,14 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
   state.detailView = targetScreen === "workspace" ? targetDetail : undefined;
   state.screen = targetScreen;
   state.senderId = "owner";
-  if (targetScreen === "settings") renderSettings(true);
-  else if (targetScreen === "new-workspace") renderEmptyWorkspace(true);
-  else if (targetScreen === "home") renderCalmHome(true);
-  else renderWorkspace();
+  if (targetScreen === "settings") {
+    if (!fromHistory) navigate("settings", undefined, replaceHistory, workspaceSettingsHref(id));
+    renderSettings(true);
+    return;
+  }
+  if (targetScreen === "new-workspace") { renderEmptyWorkspace(true); return; }
+  if (targetScreen === "home") { renderCalmHome(true); return; }
+  renderWorkspace();
   const requested = parseHref(requestedUrl, id);
   if (!fromHistory && !requested) navigate("workspace", undefined, replaceHistory, workspaceRootHref(id));
   if (requested) { void openResource(descriptor(requested, "Resource"), true); startPolling(); return; }
@@ -538,7 +585,7 @@ function patchConversations() {
   for (const channel of channels) {
     const item = object(channel);
     const id = identifier(item);
-    const label = withUnread(string(item.name) || string(item.title) || id, `channel:${id}`);
+    const label = withUnread(channelLabel(string(item.name) || string(item.title) || id), `channel:${id}`);
     chats.append(button(label, async () => {
       await selectConversation("channel", id);
     }, state.selectedConversation === id ? "selected conversation-button" : "conversation-button"));
@@ -546,7 +593,7 @@ function patchConversations() {
   chats.append(button("New channel", showChannelForm, "tree-action subtle"));
   const people = mailList("participants").map(object).filter((person) => identifier(person) !== "owner" && identifier(person) !== "orchard");
   if (people.length) chats.append(el("p", "tree-label", "Direct"));
-  for (const person of people) { const id = identifier(person); chats.append(button(withUnread(string(person.name) || id, `direct:${id}`), () => selectConversation("direct", id), state.conversationKind === "direct" && state.selectedConversation === id ? "selected conversation-button" : "conversation-button")); }
+  for (const person of people) { const id = identifier(person); chats.append(button(withUnread(participantLabel(string(person.name) || id), `direct:${id}`), () => selectConversation("direct", id), state.conversationKind === "direct" && state.selectedConversation === id ? "selected conversation-button" : "conversation-button")); }
   if (people.length) chats.append(button(withUnread("All direct messages", "direct:__all_direct__"), () => selectConversation("direct", "__all_direct__"), state.conversationKind === "direct" && state.selectedConversation === "__all_direct__" ? "selected conversation-button" : "conversation-button"));
   chats.append(button(withUnread("Broadcast", "broadcast:broadcast"), () => selectConversation("broadcast", "broadcast"), state.conversationKind === "broadcast" ? "selected conversation-button" : "conversation-button"));
   chats.append(button("Agents", () => void activateTab(collectionTab("agents", state.workspace!.id)), "tree-action subtle"), button("Connection settings", showAgentForm, "tree-action subtle"));
@@ -627,13 +674,13 @@ function renderResourceDetail(resource: Json, links: Json) {
   const mime = string(data.mime_type).toLowerCase(); const download = string(data.download_url); const preview = string(data.preview_url);
   if (state.activeResource?.ref.kind === "message") {
     const record = object(data.message); const senderId = string(record.sender_id); const destination = object(record.destination); const meta = el("div", "message-meta resource-message-meta");
-    if (senderId && state.workspace) meta.append(button(participantName(senderId), () => void openResource(descriptor({ kind: "agent", workspace_id: state.workspace!.id, id: senderId }, participantName(senderId))), "subtle message-sender"));
+    if (senderId && state.workspace) meta.append(button(participantLabel(participantName(senderId)), () => void openResource(descriptor({ kind: "agent", workspace_id: state.workspace!.id, id: senderId }, participantLabel(participantName(senderId)))), "subtle message-sender"));
     const sentAt = string(record.sent_at) || string(record.created_at) || string(record.timestamp); if (sentAt) meta.append(el("time", "message-time", sentAt));
     panel.append(meta);
     const destinationKind = string(destination.kind); const destinationId = string(destination.id);
     if (state.workspace && destinationKind) {
       const conversationRef: ResourceRef | undefined = destinationKind === "channel" && destinationId ? { kind: "channel", workspace_id: state.workspace.id, id: destinationId } : destinationKind === "broadcast" ? { kind: "broadcast", workspace_id: state.workspace.id } : destinationKind === "direct" ? { kind: "direct", workspace_id: state.workspace.id, id: destinationId === "owner" ? senderId : destinationId } : undefined;
-      if (conversationRef) panel.append(button(destinationKind === "channel" ? `# ${destinationId}` : destinationKind === "broadcast" ? "Broadcast" : `Direct · ${participantName(conversationRef.id || "")}`, () => void openResource(descriptor(conversationRef, destinationKind)), "subtle destination-link"));
+      if (conversationRef) panel.append(button(destinationKind === "channel" ? channelLabel(destinationId) : destinationKind === "broadcast" ? "Broadcast" : participantLabel(participantName(conversationRef.id || "")), () => void openResource(descriptor(conversationRef, destinationKind)), "subtle destination-link"));
     }
     panel.append(messageBody(string(record.body) || string(record.content) || string(data.body) || content)); for (const ref of array(record.refs ?? data.refs)) panel.append(referenceNode(ref));
   } else if (state.activeResource?.ref.kind === "agent") {
@@ -866,7 +913,7 @@ function taskBackendErrors() {
 
 async function selectConversation(kind: ConversationKind, id: string, fromResource = false) {
   if (state.workspace) {
-    const tab: AppTab = kind === "direct" && id === "__all_direct__" ? collectionTab("directs", state.workspace.id) : descriptor(kind === "channel" ? { kind: "channel", workspace_id: state.workspace.id, id } : kind === "direct" ? { kind: "direct", workspace_id: state.workspace.id, id } : { kind: "broadcast", workspace_id: state.workspace.id }, kind === "broadcast" ? "Broadcast" : kind === "channel" ? `# ${id}` : participantName(id));
+    const tab: AppTab = kind === "direct" && id === "__all_direct__" ? collectionTab("directs", state.workspace.id) : descriptor(kind === "channel" ? { kind: "channel", workspace_id: state.workspace.id, id } : kind === "direct" ? { kind: "direct", workspace_id: state.workspace.id, id } : { kind: "broadcast", workspace_id: state.workspace.id }, kind === "broadcast" ? "Broadcast" : kind === "channel" ? channelLabel(id) : participantLabel(participantName(id)));
     const existing = state.tabs.find((item) => item.href === tab.href);
     if (existing) existing.title = tab.title; else state.tabs.push(tab);
     state.activeHref = tab.href; state.activeResource = isDescriptor(tab) ? tab : undefined; state.resourceLinks = {}; state.navigationEpoch += 1; patchTabs();
@@ -897,7 +944,7 @@ function patchConversation() {
   const panel = document.querySelector<HTMLElement>("#conversation");
   if (!panel || !state.workspace) return;
   panel.replaceChildren();
-  const title = state.selectedConversation ? (state.conversationKind === "broadcast" ? "Broadcast" : state.conversationKind === "direct" ? state.selectedConversation === "__all_direct__" ? "All direct messages" : `Direct · ${participantName(state.selectedConversation)}` : `# ${state.selectedConversation}`) : "Choose a conversation";
+  const title = state.selectedConversation ? (state.conversationKind === "broadcast" ? "Broadcast" : state.conversationKind === "direct" ? state.selectedConversation === "__all_direct__" ? "All direct messages" : participantLabel(participantName(state.selectedConversation)) : channelLabel(state.selectedConversation)) : "Choose a conversation";
   const heading = el("header", "conversation-title");
   if (state.workspace && state.selectedConversation) {
     const ref: ResourceRef = state.conversationKind === "channel" ? { kind: "channel", workspace_id: state.workspace.id, id: state.selectedConversation } : state.conversationKind === "direct" ? { kind: "direct", workspace_id: state.workspace.id, id: state.selectedConversation } : { kind: "broadcast", workspace_id: state.workspace.id };
@@ -930,12 +977,12 @@ function renderMessageList(thread: HTMLElement, messages: unknown[], showDestina
   for (const entry of messages) {
     const item = object(entry);
     const article = el("article", "message");
-    const sender = participantName(string(item.sender_id));
+    const sender = participantLabel(participantName(string(item.sender_id)));
     const destination = object(item.destination);
     const recipient = string(destination.id);
     const meta = el("div", "message-meta");
-    if (state.workspace && string(item.sender_id)) meta.append(button(showDestination && recipient ? `${sender} → ${participantName(recipient)}` : sender, () => void openResource(descriptor({ kind: "agent", workspace_id: state.workspace!.id, id: string(item.sender_id) }, sender)), "subtle message-sender"));
-    else meta.append(el("strong", "message-sender", showDestination && recipient ? `${sender} → ${participantName(recipient)}` : sender));
+    if (state.workspace && string(item.sender_id)) meta.append(button(showDestination && recipient ? `${sender} → ${participantLabel(participantName(recipient))}` : sender, () => void openResource(descriptor({ kind: "agent", workspace_id: state.workspace!.id, id: string(item.sender_id) }, sender)), "subtle message-sender"));
+    else meta.append(el("strong", "message-sender", showDestination && recipient ? `${sender} → ${participantLabel(participantName(recipient))}` : sender));
     const sentAt = string(item.sent_at) || string(item.created_at) || string(item.timestamp);
     if (sentAt) {
       const date = new Date(sentAt);
@@ -955,71 +1002,125 @@ function renderMessageList(thread: HTMLElement, messages: unknown[], showDestina
 
 function draftKey() { return `${state.conversationKind}:${state.selectedConversation || ""}`; }
 
+function refreshDraftAttachment(key: string) {
+  for (const form of document.querySelectorAll<HTMLElement>(".composer")) if (form.dataset.draftKey === key) form.dispatchEvent(new Event("draftattachmentchange"));
+}
+
 function composer() {
   const form = el("form", "composer");
   const input = document.createElement("textarea");
-  const previousDraft = state.drafts.get(draftKey());
+  const key = draftKey();
+  const previousDraft = state.drafts.get(key);
   input.value = previousDraft?.body || "";
   input.rows = 3;
   input.placeholder = state.replyTo ? "Write a reply" : "Write a message";
   input.setAttribute("aria-label", "Message");
-  const key = draftKey();
   const workspaceId = state.workspace?.id;
+  const attachmentArea = el("div", "attachment-area");
+  const file = document.createElement("input");
+  file.type = "file"; file.hidden = true; file.tabIndex = -1; file.setAttribute("aria-hidden", "true");
+
+  const saveBody = () => {
+    const current = state.drafts.get(key);
+    state.drafts.set(key, { body: input.value, attachment: current?.attachment });
+  };
+
+  const renderAttachment = () => {
+    attachmentArea.replaceChildren();
+    const attachment = state.drafts.get(key)?.attachment;
+    if (!attachment) return;
+    const chip = el("span", `attachment-chip ${attachment.status}`);
+    const status = attachment.status === "uploading" ? " · Uploading…" : attachment.status === "failed" ? " · Upload failed" : "";
+    chip.append(el("span", "attachment-name", `${attachment.name}${status}`));
+    if (attachment.status === "failed" && attachment.file) chip.append(button("Retry", () => void uploadAttachment(attachment.file!, attachment.requestId), "attachment-retry subtle"));
+    const remove = button("×", () => {
+      const current = state.drafts.get(key);
+      if (!current || current.attachment?.requestId !== attachment.requestId) return;
+      state.drafts.set(key, { body: current.body });
+      renderAttachment();
+    }, "attachment-remove subtle");
+    remove.setAttribute("aria-label", `Remove attachment ${attachment.name}`);
+    chip.append(remove); attachmentArea.append(chip);
+  };
+
+  const uploadAttachment = async (selected: File, requestId: string = crypto.randomUUID()) => {
+    if (!workspaceId) return;
+    const current = state.drafts.get(key);
+    const pending: DraftAttachment = { name: selected.name, requestId, status: "uploading", file: selected };
+    state.drafts.set(key, { body: current?.body ?? input.value, attachment: pending });
+    renderAttachment();
+    if (selected.size > 512 * 1024) {
+      pending.status = "failed"; pending.error = "Attachments must be 512 KiB or smaller.";
+      refreshDraftAttachment(key); notice(pending.error, "error"); return;
+    }
+    try {
+      const bytes = new Uint8Array(await selected.arrayBuffer()); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
+      const result = await call("artifact_upload", { workspace_id: workspaceId, path: selected.name, content_base64: btoa(binary), request_id: requestId });
+      const originating = state.drafts.get(key);
+      if (originating?.attachment?.requestId !== requestId) return;
+      const resource = object(result.resource); const ref = object(resource.ref) as ResourceRef;
+      if (!ref.kind || ref.workspace_id !== workspaceId) throw new Error("Upload did not return a workspace resource.");
+      const ready: DraftAttachment = { name: selected.name, requestId, status: "ready", href: string(resource.href) || canonicalHref(ref), ref };
+      state.drafts.set(key, { body: originating.body, attachment: ready });
+      if (state.workspace?.id === workspaceId && draftKey() === key) { refreshDraftAttachment(key); notice("Attachment uploaded."); }
+      if (ref.kind === "file" && ref.root_id && state.workspace?.id === workspaceId) {
+        const rootKey = artifactKey(ref.root_id, ""); state.artifactEntries.delete(rootKey);
+        if (state.artifactExpanded.has(rootKey)) void loadArtifactDirectory(workspaceId, ref.root_id, "");
+        void loadArtifactRoots();
+      }
+    } catch (error) {
+      const originating = state.drafts.get(key);
+      if (originating?.attachment?.requestId !== requestId) return;
+      state.drafts.set(key, { body: originating.body, attachment: { ...originating.attachment, status: "failed", file: selected, error: message(error) } });
+      if (state.workspace?.id === workspaceId && draftKey() === key) { refreshDraftAttachment(key); notice(message(error), "error"); }
+    }
+  };
+
   const send = button("Send", async () => {
-    if (!input.value.trim() || !state.workspace) return;
+    if (!state.workspace) return;
     if (send.disabled) return;
+    const draft = state.drafts.get(key) || { body: input.value };
+    const attachment = draft.attachment;
+    if (attachment?.status === "uploading") return notice("Wait for the attachment to finish uploading.", "error");
+    if (attachment?.status === "failed") return notice("Retry or remove the failed attachment before sending.", "error");
+    const body = input.value.trim() || (attachment ? `Attached ${attachment.name}` : "");
+    if (!body) return notice("Write a message or attach a file.", "error");
     send.disabled = true;
     const kind = state.conversationKind;
     const id = state.selectedConversation;
     const target = kind === "broadcast" ? { kind } : { kind, id };
     if (kind !== "broadcast" && !id) return notice("Choose a conversation first.", "error");
     try {
-      const rawAttachment = reference.value.trim(); const attached = attachmentRef(rawAttachment);
-      if (rawAttachment && !attached) return;
-      const refs = attached ? [{ type: "resource", resource: attached }] : [];
-      const body = input.value.trim();
-      const draftAtSubmit = { body: input.value, reference: reference.value };
+      const refs = attachment?.ref ? [{ type: "resource", resource: attachment.ref }] : [];
+      const draftAtSubmit = { body: input.value, attachmentRequestId: attachment?.requestId };
       const replyTo = state.replyTo;
-      await call("mail_send", { workspace_id: state.workspace.id, request_id: crypto.randomUUID(), sender_id: "owner", destination: target, body, kind: "message", thread_id: replyTo, refs });
+      await call("mail_send", { workspace_id: workspaceId, request_id: crypto.randomUUID(), sender_id: "owner", destination: target, body, kind: "message", thread_id: replyTo, refs });
       const currentDraft = state.drafts.get(key);
-      if (state.workspace?.id !== workspaceId || draftKey() !== key) return;
-      if (currentDraft?.body === draftAtSubmit.body && currentDraft?.reference === draftAtSubmit.reference) {
-        input.value = "";
+      if (currentDraft?.body === draftAtSubmit.body && currentDraft?.attachment?.requestId === draftAtSubmit.attachmentRequestId) {
         state.drafts.delete(key);
       }
+      if (state.workspace?.id !== workspaceId || draftKey() !== key) return;
+      if (!state.drafts.has(key)) { input.value = ""; renderAttachment(); }
       if (state.replyTo === replyTo) state.replyTo = undefined;
       if (state.selectedConversation) await loadHistory(state.selectedConversation);
     } catch (error) { notice(message(error), "error"); }
     finally { if (document.contains(send)) send.disabled = false; }
   }, "primary");
   form.addEventListener("submit", (event) => { event.preventDefault(); send.click(); });
-  const destination = el("p", "muted", `To ${state.conversationKind === "broadcast" ? "everyone" : state.conversationKind === "direct" ? participantName(state.selectedConversation || "") : `# ${state.selectedConversation}`}`);
-  const advanced = document.createElement("details");
-  advanced.append(el("summary", "", "Attach"));
-  const reference = document.createElement("input"); reference.type = "text"; reference.placeholder = "Paste an Orchard link or https:// URL"; reference.value = previousDraft?.reference || ""; reference.setAttribute("aria-label", "Attachment URL");
-  const file = document.createElement("input"); file.type = "file"; file.setAttribute("aria-label", "Upload attachment");
-  const upload = button("Upload file", async () => {
-    const selected = file.files?.[0]; if (!selected || !state.workspace) return;
-    const uploadWorkspaceId = state.workspace.id; const uploadKey = key;
-    if (selected.size > 512 * 1024) return notice("Attachments must be 512 KiB or smaller.", "error");
-    if (upload.disabled) return; upload.disabled = true;
-    try {
-      const bytes = new Uint8Array(await selected.arrayBuffer()); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
-      const result = await call("artifact_upload", { workspace_id: uploadWorkspaceId, path: selected.name, content_base64: btoa(binary), request_id: crypto.randomUUID() });
-      if (state.workspace?.id !== uploadWorkspaceId || draftKey() !== uploadKey) return;
-      const resource = object(result.resource); const ref = object(resource.ref) as ResourceRef; if (!ref.kind) throw new Error("Upload did not return a resource.");
-      reference.value = string(resource.href) || canonicalHref(ref); saveDraft(); notice("Attachment uploaded.");
-      if (ref.kind === "file" && ref.root_id) {
-        const key = artifactKey(ref.root_id, ""); state.artifactEntries.delete(key);
-        if (state.artifactExpanded.has(key)) void loadArtifactDirectory(uploadWorkspaceId, ref.root_id, "");
-        void loadArtifactRoots();
-      }
-    } catch (error) { notice(message(error), "error"); } finally { if (document.contains(upload)) upload.disabled = false; }
-  }, "subtle");
-  advanced.append(reference, file, upload);
-  const saveDraft = () => state.drafts.set(key, { body: input.value, reference: reference.value });
-  input.addEventListener("input", saveDraft); reference.addEventListener("input", saveDraft);
-  form.append(destination, input, advanced, send);
+  const destination = el("p", "muted", `To ${state.conversationKind === "broadcast" ? "everyone" : state.conversationKind === "direct" ? participantLabel(participantName(state.selectedConversation || "")) : channelLabel(state.selectedConversation || "")}`);
+  const attach = button("", () => file.click(), "attach-button subtle");
+  attach.setAttribute("aria-label", "Attach file"); attach.title = "Attach file";
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M9.5 17.5 17 10a3.5 3.5 0 0 0-5-5l-8 8a5 5 0 0 0 7 7l8-8");
+  icon.append(path); attach.append(icon);
+  file.addEventListener("change", () => { const selected = file.files?.[0]; file.value = ""; if (selected) void uploadAttachment(selected); });
+  input.addEventListener("input", saveBody);
+  const attachmentControls = el("div", "attachment-controls"); attachmentControls.append(attach, file, attachmentArea);
+  form.dataset.draftKey = key; form.addEventListener("draftattachmentchange", renderAttachment);
+  renderAttachment();
+  form.append(destination, input, attachmentControls, send);
   return form;
 }
 
@@ -1027,7 +1128,7 @@ function attachmentRef(value: string): ResourceRef | undefined {
   if (!value || !state.workspace) return undefined;
   const orchard = parseHref(value, state.workspace.id); if (orchard) return orchard;
   try { const url = new URL(value); if (url.protocol === "https:" || url.protocol === "http:") return { kind: "url", workspace_id: state.workspace.id, url: url.href }; } catch { /* validation below */ }
-  notice("Attach an Orchard resource link or an HTTP(S) URL.", "error"); return undefined;
+  notice("Use an Orchard resource link or an HTTP(S) URL.", "error"); return undefined;
 }
 
 function basename(path: string) { return path.split("/").filter(Boolean).at(-1) || ""; }
@@ -1177,17 +1278,32 @@ async function createTask() {
   });
 }
 
+function openWorkspaceFromSettings() {
+  if (!state.workspace) return;
+  const href = state.activeHref || workspaceRootHref(state.workspace.id);
+  navigate("workspace", undefined, false, href);
+  renderWorkspace();
+  const active = state.tabs.find((tab) => tab.href === state.activeHref);
+  if (active) void activateTab(active, true); else renderEmptyViewer();
+}
+
 function renderSettings(fromHistory = false) {
   if (!state.workspace) return;
-  if (!fromHistory) navigate("settings");
-  shell("Connection settings", "Use this connection only to configure another already-running agent. Orchard never launches or wakes an agent.");
+  if (!fromHistory) navigate("settings", undefined, false, workspaceSettingsHref(state.workspace.id));
+  shell("Workspace settings", "Share the workspace context with collaborators, or configure another already-running agent.");
   const panel = document.querySelector<HTMLElement>(".welcome");
+  const overview = el("section", "settings-section");
+  const introduction = el("div", "settings-introduction muted", "Loading workspace introduction…");
+  const readme = el("div", "readme-summary"); readme.append(el("p", "muted", "Loading README…"));
+  const joining = codeBlock("Loading joining prompt…");
+  const workspacePath = codeBlock("Loading workspace path…");
+  overview.append(el("h2", "", "Workspace introduction"), introduction, readme, el("h2", "", "Joining prompt"), el("p", "muted", "Copy this into an agent that already has this workspace's Orchard MCP configured."), joining, el("h3", "", "Workspace path"), workspacePath);
   const endpoint = codeBlock("Not loaded");
   const token = codeBlock("Not loaded");
   const claudeConfig = codeBlock("Loading configuration…");
   const codexConfig = codeBlock("Loading configuration…");
   const codexToml = codeBlock("Loading configuration…");
-  const back = () => button("Back to workspace", () => { navigate("workspace"); renderWorkspace(); }, "subtle");
+  const back = () => button("Back to workspace", openWorkspaceFromSettings, "subtle");
   const archive = button("Archive workspace", () => {
     const confirmation = el("section", "stack");
     const confirm = button("Confirm archive workspace", async () => {
@@ -1206,8 +1322,42 @@ function renderSettings(fromHistory = false) {
     try { await call("rotate_token", { workspace_id: state.workspace!.id }); await loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml); notice("Credential rotated. Replace the affected agent configuration, then reconnect it."); }
     catch (error) { notice(message(error), "error"); }
   }, "primary");
-  panel?.append(back(), el("h2", "", "Endpoint"), endpoint, el("h2", "", "Credential"), token, el("p", "muted", "Each workspace gets its own MCP alias. Orchard does not launch or wake agents."), el("h3", "", "Claude Code"), claudeConfig, el("h3", "", "Codex"), codexConfig, el("h3", "", "Codex TOML"), codexToml, el("p", "muted", "For Codex, ORCHARD_TOKEN must exist in the process that launches the harness; exporting it in a terminal does not change an already-running app. After adding config, reconnect or reload MCP as the harness supports. The agent then calls workspace_info, mail_register or mail_resume, polls mail_inbox, and acknowledges received message ids."), actionRow(rotate, archive, back()));
+  const connection = document.createElement("details"); connection.className = "settings-section connection-details";
+  connection.append(el("summary", "", "Connection details"), el("h2", "", "Endpoint"), endpoint, el("h2", "", "Credential"), token, el("p", "muted", "Each workspace gets its own MCP alias. Orchard does not launch or wake agents."), el("h3", "", "Claude Code"), claudeConfig, el("h3", "", "Codex"), codexConfig, el("h3", "", "Codex TOML"), codexToml, el("p", "muted", "For Codex, ORCHARD_TOKEN must exist in the process that launches the harness; exporting it in a terminal does not change an already-running app. After adding config, reconnect or reload MCP as the harness supports."), actionRow(rotate));
+  panel?.append(back(), overview, connection, actionRow(archive, back()));
+  void loadWorkspaceIntroduction(introduction, readme, joining, workspacePath);
   void loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml);
+}
+
+async function loadWorkspaceIntroduction(introduction: HTMLElement, readme: HTMLElement, joining: HTMLElement, workspacePathBlock: HTMLElement) {
+  if (!state.workspace) return;
+  const workspaceId = state.workspace.id;
+  try {
+    const [intro, info] = await Promise.all([call("workspace_intro", { workspace_id: workspaceId }), call("workspace_info", { workspace_id: workspaceId })]);
+    if (state.workspace?.id !== workspaceId || !document.contains(introduction)) return;
+    const introText = string(intro.introduction) || "This workspace is ready for collaborators.";
+    const participants = array(intro.participants).length; const channels = array(intro.channels).length;
+    const counts = `${participants} participant${participants === 1 ? "" : "s"} · ${channels} channel${channels === 1 ? "" : "s"}`;
+    const summary = introductionSummary(introText) || "This workspace is ready for collaborators.";
+    introduction.replaceChildren(document.createTextNode(`${summary} `), el("span", "intro-counts", counts));
+    if (summary !== introText) {
+      const full = document.createElement("details"); full.className = "introduction-details";
+      full.append(el("summary", "", "Read full introduction"), el("p", "", introText)); introduction.append(full);
+    }
+    const readmeRecord = object(intro.readme); readme.replaceChildren();
+    if (readmeRecord.exists === true) {
+      const ref = object(readmeRecord.ref) as ResourceRef;
+      const open = button("Open README", () => {
+        if (!ref.kind || ref.workspace_id !== workspaceId) return notice("The README resource is unavailable.", "error");
+        renderWorkspace(); void openResource({ ref, href: string(readmeRecord.href) || canonicalHref(ref), title: string(readmeRecord.path) || "README.md", kind: ref.kind });
+      }, "subtle");
+      readme.append(el("p", "muted", "The workspace README is available in Artifacts."), open);
+    } else readme.append(el("p", "muted", "This workspace does not have a README yet."));
+    const code = joining.querySelector("code");
+    const workspacePath = string(object(info.paths).workspace);
+    if (code) code.textContent = string(intro.joining_prompt) || "Joining information is unavailable.";
+    const pathCode = workspacePathBlock.querySelector("code"); if (pathCode) pathCode.textContent = workspacePath || "Workspace path is unavailable.";
+  } catch (error) { if (state.workspace?.id === workspaceId && document.contains(introduction)) { introduction.textContent = "Workspace introduction is unavailable."; notice(message(error), "error"); } }
 }
 
 async function loadConnection(endpoint: HTMLElement, token: HTMLElement, claudeConfig?: HTMLElement, codexConfig?: HTMLElement, codexToml?: HTMLElement) {
