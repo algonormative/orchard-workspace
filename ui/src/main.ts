@@ -99,6 +99,10 @@ function button(label: string, onClick: () => void | Promise<void>, className = 
   return node;
 }
 
+function actionRow(...items: HTMLElement[]) {
+  const row = el("div", "form-actions"); row.append(...items); return row;
+}
+
 /** The only renderer for copyable block code.  Keep its source as text, never HTML. */
 function codeBlock(content: string, label = "Copy") {
   const block = el("section", "code-block");
@@ -378,7 +382,7 @@ function renderEmptyWorkspace(fromHistory = false) {
     if (state.workspace) { navigate("workspace"); renderWorkspace(); }
     else renderCalmHome();
   }, "subtle");
-  form.append(name, submit, cancel);
+  form.append(name, actionRow(submit, cancel));
   document.querySelector(".welcome")?.append(form);
 }
 
@@ -654,7 +658,7 @@ function renderResourceDetail(resource: Json, links: Json) {
     const ref = state.activeResource.ref; if (ref.store_id && ref.task_id && state.workspace) {
       const status = document.createElement("select"); status.setAttribute("aria-label", "Task status"); for (const value of ["open", "in_progress", "blocked", "closed"]) { const option = document.createElement("option"); option.value = value; option.textContent = value; option.selected = value === string(task.status) || value === string(data.status); status.append(option); }
       const active = state.activeResource; const workspaceId = state.workspace.id; const href = active.href; const epoch = state.navigationEpoch;
-      panel.append(status, button("Update status", async () => { try { await call("task_update", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, status: status.value, request_id: crypto.randomUUID() }); if (state.workspace?.id === workspaceId && state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); } catch (error) { notice(message(error), "error"); } }, "subtle"));
+      const controls = el("div", "task-controls"); controls.append(status, button("Update status", async () => { try { await call("task_update", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, status: status.value, request_id: crypto.randomUUID() }); if (state.workspace?.id === workspaceId && state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); } catch (error) { notice(message(error), "error"); } }, "subtle")); panel.append(controls);
     }
   } else if (state.activeResource?.ref.kind === "file") {
     if (typeof data.text === "string") {
@@ -1039,7 +1043,7 @@ function openTasks() {
 function renderTaskCollection() {
   if (!state.workspace) return;
   const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return; panel.replaceChildren(el("header", "conversation-title", "Tasks"));
-  panel.append(button("Add project", () => void attachRepository(), "subtle"));
+  const actions = el("div", "resource-actions"); actions.append(button("Add project", () => void attachRepository(), "subtle")); panel.append(actions);
   const stores = workspaceStores().map(object);
   if (!stores.length) { panel.append(el("p", "empty-state muted", "No task stores are connected.")); return; }
   const picker = el("div", "collection-picker");
@@ -1059,7 +1063,7 @@ function renderAgentCollection() {
     if (string(participant.last_contact_at)) row.append(el("p", "muted", `Last seen ${string(participant.last_contact_at)}`));
     panel.append(row);
   }
-  panel.append(button("Connection settings", showAgentForm, "subtle"));
+  const actions = el("div", "resource-actions"); actions.append(button("Connection settings", showAgentForm, "subtle")); panel.append(actions);
 }
 function selectStore(item: Json) {
   const store = object(item.store); const id = identifier(store) || string(store.store_id);
@@ -1099,11 +1103,12 @@ function showInlineForm(title: string, fields: Array<[string, string, string]>, 
   navigate("workspace", "form");
   const formEpoch = state.detailEpoch;
   const returnToViewer = () => { state.formReturn = undefined; state.detailView = undefined; if (returnTab) void activateTab(returnTab, true); else renderEmptyViewer(); };
-  panel.replaceChildren(button("Back", returnToViewer, "close-button subtle"), el("h2", "", title));
+  const content = el("section", "viewer-content form-view");
+  content.append(button("Back", returnToViewer, "close-button subtle"), el("h2", "", title));
   const form = el("form", "stack"); const inputs = new Map<string, HTMLInputElement>();
   for (const [name, label, placeholder] of fields) { const input = document.createElement("input"); input.name = name; input.required = true; input.placeholder = placeholder; input.setAttribute("aria-label", label); inputs.set(name, input); form.append(el("label", "", label), input); }
   const submit = button(submitLabel, async () => { const values = Object.fromEntries([...inputs].map(([name, input]) => [name, input.value.trim()])); if (Object.values(values).some((value) => !value)) return notice("Complete each field.", "error"); if (submit.disabled) return; submit.disabled = true; try { const stillActive = () => state.detailEpoch === formEpoch && state.detailView === "form"; await action(values, stillActive); if (stillActive()) returnToViewer(); } finally { if (document.contains(submit)) submit.disabled = false; } }, "primary");
-  form.addEventListener("submit", (event) => { event.preventDefault(); submit.click(); }); form.append(submit, button("Cancel", returnToViewer, "subtle")); panel.append(form);
+  form.addEventListener("submit", (event) => { event.preventDefault(); submit.click(); }); form.append(actionRow(submit, button("Cancel", returnToViewer, "subtle"))); content.append(form); panel.replaceChildren(content);
 }
 
 function showChannelForm() {
@@ -1146,7 +1151,7 @@ async function loadTasks() {
 function patchTaskPanel(panel: HTMLElement) {
   const section = el("section", "task-panel");
   const selectedStore = workspaceStores().map(object).find((item) => identifier(object(item.store)) === state.store?.id);
-  const create = button("New task", () => void createTask(), "subtle");
+  const create = button("New task", () => void createTask(), "subtle task-create");
   create.disabled = !selectedStore || selectedStore.tasks === null;
   if (create.disabled) create.title = "This task source is unavailable.";
   section.append(create);
@@ -1185,7 +1190,7 @@ function renderSettings(fromHistory = false) {
   const back = () => button("Back to workspace", () => { navigate("workspace"); renderWorkspace(); }, "subtle");
   const archive = button("Archive workspace", () => {
     const confirmation = el("section", "stack");
-    confirmation.append(el("p", "error", "Archive this workspace? Its data remains on disk, but it leaves the active workspace list."), button("Confirm archive workspace", async () => {
+    const confirm = button("Confirm archive workspace", async () => {
       try {
         await call("workspace_archive", { workspace_id: state.workspace!.id });
         await refreshWorkspaces();
@@ -1193,13 +1198,15 @@ function renderSettings(fromHistory = false) {
         if (state.workspaces.length) await chooseWorkspace(state.workspaces[0].id);
         else renderEmptyWorkspace();
       } catch (error) { notice(message(error), "error"); }
-    }, "primary"), button("Cancel archive", () => confirmation.remove(), "subtle"));
+    }, "primary");
+    confirmation.append(el("p", "error", "Archive this workspace? Its data remains on disk, but it leaves the active workspace list."), actionRow(confirm, button("Cancel archive", () => confirmation.remove(), "subtle")));
     panel?.append(confirmation);
   }, "subtle");
-  panel?.append(back(), el("h2", "", "Endpoint"), endpoint, el("h2", "", "Credential"), token, el("p", "muted", "Each workspace gets its own MCP alias. Orchard does not launch or wake agents."), el("h3", "", "Claude Code"), claudeConfig, el("h3", "", "Codex"), codexConfig, el("h3", "", "Codex TOML"), codexToml, el("p", "muted", "For Codex, ORCHARD_TOKEN must exist in the process that launches the harness; exporting it in a terminal does not change an already-running app. After adding config, reconnect or reload MCP as the harness supports. The agent then calls workspace_info, mail_register or mail_resume, polls mail_inbox, and acknowledges received message ids."), button("Rotate credential", async () => {
+  const rotate = button("Rotate credential", async () => {
     try { await call("rotate_token", { workspace_id: state.workspace!.id }); await loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml); notice("Credential rotated. Replace the affected agent configuration, then reconnect it."); }
     catch (error) { notice(message(error), "error"); }
-  }, "primary"), archive, back());
+  }, "primary");
+  panel?.append(back(), el("h2", "", "Endpoint"), endpoint, el("h2", "", "Credential"), token, el("p", "muted", "Each workspace gets its own MCP alias. Orchard does not launch or wake agents."), el("h3", "", "Claude Code"), claudeConfig, el("h3", "", "Codex"), codexConfig, el("h3", "", "Codex TOML"), codexToml, el("p", "muted", "For Codex, ORCHARD_TOKEN must exist in the process that launches the harness; exporting it in a terminal does not change an already-running app. After adding config, reconnect or reload MCP as the harness supports. The agent then calls workspace_info, mail_register or mail_resume, polls mail_inbox, and acknowledges received message ids."), actionRow(rotate, archive, back()));
   void loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml);
 }
 
