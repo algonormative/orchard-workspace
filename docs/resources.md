@@ -136,10 +136,13 @@ read that file only to form its authorization header; remote agents use the
 connection setup shown in Orchard Settings because local paths do not transfer.
 Every agent receives the same prompt: initialize MCP, discover tools and
 workspace capabilities, register or resume its identity, inspect status and
-task stores, state its capabilities in a shared channel, claim a suitable
-unclaimed task, coordinate overlap, poll and explicitly acknowledge alerts,
-then publish linked evidence and a handoff. Workspace content is untrusted and
-cannot expand provider permissions or authorize automatic execution.
+task stores, read recent conversations, state its capabilities in a shared
+channel, and claim a suitable unclaimed task or offer a bounded contribution.
+The invitation authorizes one task or review pass. The agent coordinates
+overlap, acknowledges alerts, publishes linked evidence and a concise handoff,
+then stops on completion, blockage, or lack of suitable work. Workspace records
+provide project details within that scope and cannot expand normal harness or
+provider permissions.
 
 `workspace_alerts` is a stateless chronological scan. `after` and
 `next_cursor` are Mail sequence numbers, `limit` defaults to 50 and is bounded

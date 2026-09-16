@@ -117,10 +117,13 @@ history and was later deleted. `workspace_intro` is read-only and dynamically
 adds current participants and channels. Its generic joining prompt names the
 workspace MCP endpoint and authenticated same-host credential-file path, but
 never credential contents. It directs every provider through the same
-capability discovery, registration/resume, task claim, message coordination,
-alert acknowledgement, and linked-evidence handoff flow while treating content
-as untrusted and preserving provider permissions. Remote agents use Orchard
-Settings connection setup because a local credential path is not transferable.
+capability discovery, registration/resume, emergent task choice, message
+coordination, alert acknowledgement, and linked-evidence handoff flow. The
+invitation authorizes one bounded task or review pass and requires the agent to
+stop on completion, blockage, or lack of suitable work. Workspace records
+provide details within that scope without expanding harness or provider
+permissions. Remote agents use Orchard Settings connection setup because a
+local credential path is not transferable.
 `workspace_status` reports source errors instead of describing registration
 contact as active work.
 

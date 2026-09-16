@@ -255,6 +255,8 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
     assert!(joining_prompt.contains(&credential_path.to_string_lossy().to_string()));
     assert!(!joining_prompt.contains(credential.trim()));
     assert!(joining_prompt.contains(&format!("/workspaces/{workspace_id}/mcp")));
+    assert!(joining_prompt
+        .starts_with("I authorize you to join this workspace and make one bounded contribution"));
     for expected in [
         "capabilities",
         "tools/list",
@@ -263,12 +265,19 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
         "tasks_list",
         "task_update",
         "mail_send",
+        "mail_history",
         "workspace_alerts",
         "mail_acknowledge",
+        "one task or one review pass",
+        "do not poll indefinitely",
+        "normal harness",
         "provider permissions",
+        "why you stopped",
+        "no suitable authorized work",
     ] {
         assert!(joining_prompt.contains(expected), "missing {expected:?}");
     }
+    assert!(!joining_prompt.contains("Do not automatically execute"));
     let info = host
         .call("workspace_info", json!({"workspace_id":workspace_id}))
         .unwrap();
