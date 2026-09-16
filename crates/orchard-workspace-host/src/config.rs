@@ -44,6 +44,14 @@ pub(crate) struct WorkspaceConfig {
 pub(crate) struct RepositoryConfig {
     pub id: String,
     pub path: PathBuf,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub task_store_id: Option<String>,
+    #[serde(default = "default_task_status")]
+    pub task_status: String,
+    #[serde(default)]
+    pub task_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +60,14 @@ pub(crate) struct TaskStoreConfig {
     pub path: PathBuf,
     pub db_path: PathBuf,
     pub schema_version: u32,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub repository_id: Option<String>,
+}
+
+fn default_task_status() -> String {
+    "none".to_owned()
 }
 
 pub(crate) fn load(data_root: &Path) -> Result<AppConfig, HostError> {

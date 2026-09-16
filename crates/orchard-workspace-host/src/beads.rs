@@ -96,6 +96,8 @@ impl BeadsAdapter {
             path: root.to_path_buf(),
             db_path: db_path.clone(),
             schema_version: SUPPORTED_SCHEMA_VERSION,
+            source: Some("owned".to_owned()),
+            repository_id: None,
         };
         let output = self
             .run_process(
@@ -135,6 +137,8 @@ impl BeadsAdapter {
             path: store_root,
             db_path,
             schema_version: SUPPORTED_SCHEMA_VERSION,
+            source: None,
+            repository_id: None,
         })
     }
 

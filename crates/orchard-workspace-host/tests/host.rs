@@ -227,6 +227,292 @@ fn real_br_task_lifecycle_retries_external_refresh_and_duplicate_ids() {
 }
 
 #[test]
+fn project_attach_discovers_repo_root_beads_and_lists_qualified_tasks() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let host = WorkspaceHost::open(data_root.clone(), packaged_br()).unwrap();
+    let (workspace_id, owned_store_id, workspace_root) = create_workspace(&host, "Projects");
+    let created = host
+        .call(
+            "task_create",
+            json!({
+                "workspace_id":workspace_id,"store_id":owned_store_id,
+                "request_id":"project-fixture","title":"Project task"
+            }),
+        )
+        .unwrap();
+    let task_id = created["task"]["id"].as_str().unwrap().to_owned();
+
+    let repository = temp.path().join("compatible-project");
+    git2::Repository::init(&repository).unwrap();
+    copy_tree(
+        &workspace_root.join("tasks/.beads"),
+        &repository.join(".beads"),
+    );
+    let attached = host
+        .call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":repository}),
+        )
+        .unwrap();
+    assert_eq!(attached["attached"], true);
+    assert_eq!(attached["task_store_attached"], true);
+    assert_eq!(attached["repository"]["name"], "compatible-project");
+    assert_eq!(attached["repository"]["task_status"], "linked");
+    assert_eq!(attached["task_store"]["source"], "repository");
+    let project_store_id = attached["repository"]["task_store_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let tasks = host
+        .call(
+            "tasks_list",
+            json!({"workspace_id":workspace_id,"store_id":project_store_id}),
+        )
+        .unwrap();
+    let copied = tasks["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == task_id)
+        .unwrap();
+    assert_eq!(copied["task_ref"]["store_id"], project_store_id);
+    assert_ne!(project_store_id, owned_store_id);
+
+    drop(host);
+    let reopened = WorkspaceHost::open(data_root.clone(), packaged_br()).unwrap();
+    let workspace = &reopened.call("workspace_list", json!({})).unwrap()["workspaces"][0];
+    assert_eq!(workspace["repositories"][0]["task_status"], "linked");
+    assert_eq!(workspace["task_stores"][0]["source"], "owned");
+    assert_eq!(workspace["task_stores"][1]["source"], "repository");
+
+    let config_before = fs::read(data_root.join("config.json")).unwrap();
+    fs::remove_file(repository.join(".beads/beads.db")).unwrap();
+    let snapshot = reopened
+        .call("workspace_snapshot", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    assert_eq!(snapshot["repositories"][0]["task_status"], "missing");
+    assert!(snapshot["repositories"][0]["task_error"]
+        .as_str()
+        .unwrap()
+        .contains("is missing"));
+    assert_eq!(
+        fs::read(data_root.join("config.json")).unwrap(),
+        config_before
+    );
+}
+
+#[test]
+fn project_attach_keeps_no_beads_and_unsupported_projects_visible_and_read_only() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, _, _) = create_workspace(&host, "Project status");
+
+    let plain = temp.path().join("plain");
+    git2::Repository::init(&plain).unwrap();
+    fs::write(plain.join("beads.db"), b"not a repo-root .beads store").unwrap();
+    let plain_result = host
+        .call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":plain}),
+        )
+        .unwrap();
+    assert_eq!(plain_result["repository"]["task_status"], "none");
+    assert_eq!(plain_result["repository"]["task_store_id"], Value::Null);
+    assert!(!plain.join(".beads").exists());
+
+    let bare = temp.path().join("bare.git");
+    git2::Repository::init_bare(&bare).unwrap();
+    let bare_result = host
+        .call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":bare}),
+        )
+        .unwrap();
+    assert_eq!(bare_result["repository"]["name"], "bare");
+    assert_eq!(bare_result["repository"]["task_status"], "none");
+
+    let unsupported = temp.path().join("unsupported-project");
+    git2::Repository::init(&unsupported).unwrap();
+    fs::create_dir_all(unsupported.join(".beads")).unwrap();
+    let db_path = unsupported.join(".beads/beads.db");
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        "PRAGMA user_version=1; CREATE TABLE issues(id TEXT PRIMARY KEY, title TEXT); CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('unchanged');",
+    )
+    .unwrap();
+    drop(db);
+    let unsupported_result = host
+        .call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":unsupported}),
+        )
+        .unwrap();
+    assert_eq!(
+        unsupported_result["repository"]["task_status"],
+        "unsupported"
+    );
+    assert!(unsupported_result["repository"]["task_error"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported Beads schema"));
+    assert_eq!(unsupported_result["task_store"], Value::Null);
+    let sentinel: String = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row("SELECT value FROM sentinel", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sentinel, "unchanged");
+}
+
+#[test]
+fn project_reattach_reconciles_new_beads_and_detach_preserves_sources_and_files() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, owned_store_id, workspace_root) = create_workspace(&host, "Reconcile");
+    let repository = temp.path().join("later-beads");
+    git2::Repository::init(&repository).unwrap();
+
+    let first = host
+        .call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":repository}),
+        )
+        .unwrap();
+    let repository_id = first["repository"]["id"].as_str().unwrap().to_owned();
+    copy_tree(
+        &workspace_root.join("tasks/.beads"),
+        &repository.join(".beads"),
+    );
+    let second = host
+        .call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":repository}),
+        )
+        .unwrap();
+    assert_eq!(second["attached"], false);
+    assert_eq!(second["repository"]["id"], repository_id);
+    assert_eq!(second["repository"]["task_status"], "linked");
+    let store_id = second["repository"]["task_store_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let third = host
+        .call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":repository}),
+        )
+        .unwrap();
+    assert_eq!(third["task_store_attached"], false);
+    assert_eq!(third["repository"]["task_store_id"], store_id);
+
+    #[cfg(unix)]
+    {
+        let alias = temp.path().join("project-alias");
+        std::os::unix::fs::symlink(&repository, &alias).unwrap();
+        let alias_result = host
+            .call(
+                "repository_attach",
+                json!({"workspace_id":workspace_id,"path":alias}),
+            )
+            .unwrap();
+        assert_eq!(alias_result["attached"], false);
+        assert_eq!(alias_result["repository"]["id"], repository_id);
+    }
+
+    let (other_workspace_id, _, _) = create_workspace(&host, "Other workspace");
+    let cross_workspace = host.call(
+        "repository_attach",
+        json!({"workspace_id":other_workspace_id,"path":repository}),
+    );
+    assert!(cross_workspace
+        .unwrap_err()
+        .contains("already attached to workspace"));
+    let workspaces = host.call("workspace_list", json!({})).unwrap();
+    assert!(workspaces["workspaces"][1]["repositories"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let owned_detach = host.call(
+        "task_store_detach",
+        json!({"workspace_id":workspace_id,"store_id":owned_store_id}),
+    );
+    assert!(owned_detach.unwrap_err().contains("cannot be detached"));
+    host.call(
+        "repository_detach",
+        json!({"workspace_id":workspace_id,"repository_id":repository_id}),
+    )
+    .unwrap();
+    assert!(repository.join(".beads/beads.db").exists());
+    let workspace = &host.call("workspace_list", json!({})).unwrap()["workspaces"][0];
+    assert!(workspace["repositories"].as_array().unwrap().is_empty());
+    let retained = workspace["task_stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|store| store["id"] == store_id)
+        .unwrap();
+    assert_eq!(retained["source"], "external");
+    assert_eq!(retained["repository_id"], Value::Null);
+
+    let reattached = host
+        .call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":repository}),
+        )
+        .unwrap();
+    assert_eq!(reattached["repository"]["task_store_id"], store_id);
+    assert_eq!(reattached["task_store_attached"], false);
+    host.call(
+        "task_store_detach",
+        json!({"workspace_id":workspace_id,"store_id":store_id}),
+    )
+    .unwrap();
+    assert!(repository.join(".beads/beads.db").exists());
+    let workspace = &host.call("workspace_list", json!({})).unwrap()["workspaces"][0];
+    assert_eq!(workspace["repositories"][0]["task_store_id"], Value::Null);
+    assert_eq!(workspace["repositories"][0]["task_status"], "none");
+}
+
+#[test]
+fn legacy_config_defaults_preserve_project_and_owned_source_views() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let repository = temp.path().join("legacy-project");
+    git2::Repository::init(&repository).unwrap();
+    {
+        let host = WorkspaceHost::open(data_root.clone(), packaged_br()).unwrap();
+        let (workspace_id, _, _) = create_workspace(&host, "Legacy config");
+        host.call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":repository}),
+        )
+        .unwrap();
+    }
+
+    let config_path = data_root.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    let workspace = &mut config["workspaces"][0];
+    for field in ["name", "task_store_id", "task_status", "task_error"] {
+        workspace["repositories"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+    }
+    for store in workspace["task_stores"].as_array_mut().unwrap() {
+        store.as_object_mut().unwrap().remove("source");
+        store.as_object_mut().unwrap().remove("repository_id");
+    }
+    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+
+    let host = WorkspaceHost::open(data_root, packaged_br()).unwrap();
+    let workspace = &host.call("workspace_list", json!({})).unwrap()["workspaces"][0];
+    assert_eq!(workspace["repositories"][0]["name"], "legacy-project");
+    assert_eq!(workspace["repositories"][0]["task_status"], "none");
+    assert_eq!(workspace["task_stores"][0]["source"], "owned");
+}
+
+#[test]
 fn unsupported_schema_and_cross_workspace_alias_are_rejected_without_mutation() {
     let temp = TempDir::new().unwrap();
     let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();

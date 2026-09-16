@@ -144,10 +144,8 @@ try {
   await page.getByRole("button", { name: "general", exact: true }).waitFor();
   await page.screenshot({ path: screenshots.workspace, fullPage: true });
 
-  await page.getByRole("button", { name: "Tasks", exact: true }).click();
-  const storeButton = page.getByRole("button", { name: ownedStore.path, exact: true });
-  await storeButton.waitFor();
-  await actionResult(page, "tasks_list", () => storeButton.click());
+  await actionResult(page, "tasks_list", () => page.getByRole("button", { name: "Tasks", exact: true }).click());
+  await page.getByText("Workspace tasks", { exact: true }).waitFor();
   await page.getByRole("button", { name: "New task", exact: true }).click();
   await page.getByLabel("Task title", { exact: true }).fill(taskTitle);
   const createdTask = await actionResult(page, "task_create", () =>
@@ -191,7 +189,6 @@ try {
   await actionResult(page, "mail_history", () =>
     page.getByRole("button", { name: "general", exact: true }).click(),
   );
-  await page.getByLabel("Message kind", { exact: true }).selectOption("result");
   await page.getByLabel("Message", { exact: true }).fill(messageBody);
   await page.getByText("Add an evidence reference", { exact: true }).click();
   await page.getByLabel("Evidence reference URL", { exact: true }).fill(evidenceUrl);
@@ -199,15 +196,15 @@ try {
     page.getByRole("button", { name: "Send", exact: true }).click(),
   );
   if (
-    sent?.message?.kind !== "result" ||
+    sent?.message?.kind !== "message" ||
     sent.message.refs?.[0]?.url !== evidenceUrl ||
     sent.message.refs?.[0]?.label !== "Evidence"
   ) {
     throw new Error(`mail_send lost its annotation: ${JSON.stringify(sent)}`);
   }
 
-  await page.getByRole("button", { name: "Ledger", exact: true }).click();
-  await page.getByLabel("Filter ledger kinds", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Activity", exact: true }).click();
+  await page.getByLabel("Search activity", { exact: true }).waitFor();
   await page.locator("#details").getByText(messageBody, { exact: true }).waitFor();
   const evidenceLink = page.locator('#details a[href="https://example.com/orchard-live-smoke"]');
   await evidenceLink.waitFor();

@@ -27,13 +27,19 @@ Each workspace has:
 - durable human participant `owner` and system participant `orchard`;
 - an app-owned classic Beads store at `tasks/.beads/` when the reviewed `br`
   binary is available;
-- optional Git repository references and attached task stores, stored as
-  canonical-path metadata only.
+- optional Git project references and attached task stores, stored as
+  canonical-path metadata only. Adding a project inspects only that project's
+  root `.beads/beads.db` and links a compatible store automatically.
 
 Repository attachment uses `git2`; Orchard never runs an external `git`
-command and never commits attached code. Archiving retains all files and
-metadata while immediately removing the workspace endpoint and write access.
-Missing repositories and stores appear as explicit snapshot errors.
+command and never clones, checks out, creates a worktree, or commits attached
+code. Beads discovery is a read-only schema inspection: Orchard does not run
+`br init`, migrate, or modify an unsupported external store. A project without
+Beads, including a bare repository, remains attached with `task_status: none`.
+An incomplete or unsupported store remains attached with `task_status` and
+`task_error` describing why tasks are unavailable. Archiving retains all files
+and metadata while immediately removing the workspace endpoint and write
+access. Missing repositories and linked stores appear explicitly in views.
 
 ## Rust interface
 
@@ -60,7 +66,7 @@ Direct host operations are an allowlist:
 | `workspace_info` | `{workspace_id}`; sanitized and also available to that workspace's MCP clients |
 | `connection_info` | `{workspace_id}`; direct call only, returns that workspace's MCP endpoint and token |
 | `rotate_token` | `{workspace_id}` |
-| `repository_attach` / `repository_detach` | `{workspace_id, path}` / `{workspace_id, repository_id}` |
+| `repository_attach` / `repository_detach` | `{workspace_id, path}` / `{workspace_id, repository_id}`; attach returns `{repository, task_store, attached, task_store_attached}` |
 | `task_store_attach` / `task_store_detach` | `{workspace_id, path}` / `{workspace_id, store_id}` |
 | `tasks_list` | `{workspace_id, store_id, status?}` |
 | `task_show` | `{workspace_id, store_id, task_id}` |
@@ -75,6 +81,21 @@ with `workspace_id` added to their normal arguments. `workspace_id` is stripped
 before the shared `MailService` call. Task responses always carry a qualified
 `task_ref: {store_id, task_id}`, because different stores may contain the same
 task ID.
+
+Repository views add `name`, `task_store_id`, `task_status`, and `task_error`.
+`task_status` is one of `linked`, `none`, `missing`, or `unsupported`.
+Task-store views add `name`, `source`, and `repository_id`; `source` is one of
+`owned`, `repository`, or `external`. The app-owned `default` store is listed
+first when present. Manually attached legacy stores remain `external` and stay
+queryable independently.
+
+Repeating `repository_attach` is idempotent and re-runs discovery, so a project
+first added without Beads can acquire a later-created compatible store. The
+same canonical database may be reused by a project and a manual source in one
+workspace, but cannot be owned by two workspaces. `repository_detach` removes
+the project association while retaining its task store as an external source.
+`task_store_detach` never deletes files, refuses the owned store, and clears any
+project links to the detached source.
 
 `workspace_snapshot` has one stable flattened shape:
 

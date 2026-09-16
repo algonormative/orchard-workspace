@@ -472,18 +472,107 @@ impl WorkspaceHost {
             .unwrap_or_else(|| repository.path())
             .canonicalize()
             .map_err(|error| error.to_string())?;
+        let name = repository_name(&path);
+        let discovered = inspect_repository_task_store(&path);
         let mut config = self.inner.config.lock().unwrap();
-        let workspace = active_workspace_mut(&mut config, &workspace_id)?;
-        if let Some(existing) = workspace.repositories.iter().find(|repo| repo.path == path) {
-            return Ok(json!({"repository": repository_view(existing), "attached": false}));
+        let mut next_config = config.clone();
+        let matching_store = discovered.store.as_ref().and_then(|candidate| {
+            next_config.workspaces.iter().find_map(|workspace| {
+                workspace
+                    .task_stores
+                    .iter()
+                    .find(|store| store.db_path == candidate.db_path)
+                    .map(|store| (workspace.id.clone(), store.clone()))
+            })
+        });
+        if let Some((owner, _)) = &matching_store {
+            if owner != &workspace_id {
+                return Err(format!(
+                    "task store {} is already attached to workspace {}; a canonical database has one Orchard lock owner",
+                    discovered.store.as_ref().unwrap().db_path.display(), owner
+                ));
+            }
         }
-        let repository = RepositoryConfig {
-            id: Uuid::new_v4().simple().to_string(),
-            path,
+
+        let workspace = active_workspace_mut(&mut next_config, &workspace_id)?;
+        let existing_index = workspace
+            .repositories
+            .iter()
+            .position(|repository| repository.path == path);
+        let attached = existing_index.is_none();
+        let repository_id = existing_index
+            .map(|index| workspace.repositories[index].id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        let mut task_store_attached = false;
+        let task_store_id = if let Some((_, store)) = matching_store {
+            Some(store.id)
+        } else if let Some(mut store) = discovered.store.clone() {
+            store.id = Uuid::new_v4().simple().to_string();
+            store.source = Some("repository".to_owned());
+            store.repository_id = Some(repository_id.clone());
+            let id = store.id.clone();
+            workspace.task_stores.push(store);
+            task_store_attached = true;
+            Some(id)
+        } else {
+            existing_index.and_then(|index| workspace.repositories[index].task_store_id.clone())
         };
-        workspace.repositories.push(repository.clone());
-        config::save(&self.inner.data_root, &config).map_err(|error| error.to_string())?;
-        Ok(json!({"repository": repository_view(&repository), "attached": true}))
+        let repository = RepositoryConfig {
+            id: repository_id,
+            path,
+            name,
+            task_store_id,
+            task_status: discovered.status,
+            task_error: discovered.error,
+        };
+        if let Some(index) = existing_index {
+            let replaced_store_id = workspace.repositories[index]
+                .task_store_id
+                .as_ref()
+                .filter(|store_id| Some(*store_id) != repository.task_store_id.as_ref())
+                .cloned();
+            workspace.repositories[index] = repository.clone();
+            if let Some(store_id) = replaced_store_id {
+                let still_referenced = workspace
+                    .repositories
+                    .iter()
+                    .any(|repository| repository.task_store_id.as_deref() == Some(&store_id));
+                if !still_referenced {
+                    if let Some(store) = workspace.task_stores.iter_mut().find(|store| {
+                        store.id == store_id
+                            && store.repository_id.as_deref() == Some(&repository.id)
+                    }) {
+                        store.repository_id = None;
+                        store.source = Some("external".to_owned());
+                    }
+                }
+            }
+        } else {
+            workspace.repositories.push(repository.clone());
+        }
+        let task_store = repository.task_store_id.as_ref().and_then(|store_id| {
+            workspace
+                .task_stores
+                .iter()
+                .find(|store| &store.id == store_id)
+                .cloned()
+        });
+        config::save(&self.inner.data_root, &next_config).map_err(|error| error.to_string())?;
+        *config = next_config;
+        if let Some(store) = &task_store {
+            self.inner
+                .store_locks
+                .write()
+                .unwrap()
+                .entry(store.db_path.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())));
+        }
+        Ok(json!({
+            "repository": repository_view(&repository, task_store.as_ref()),
+            "task_store": task_store.as_ref().map(task_store_view),
+            "attached": attached,
+            "task_store_attached": task_store_attached
+        }))
     }
 
     fn repository_detach(&self, args: Value) -> Result<Value, String> {
@@ -500,6 +589,12 @@ impl WorkspaceHost {
         if before == workspace.repositories.len() {
             return Err(format!("unknown repository {repository_id:?}"));
         }
+        for store in &mut workspace.task_stores {
+            if store.repository_id.as_deref() == Some(&repository_id) {
+                store.repository_id = None;
+                store.source = Some("external".to_owned());
+            }
+        }
         config::save(&self.inner.data_root, &config).map_err(|error| error.to_string())?;
         Ok(json!({"repository_id": repository_id, "detached": true}))
     }
@@ -510,6 +605,7 @@ impl WorkspaceHost {
         self.active_runtime(&workspace_id)?;
         let requested = PathBuf::from(required_string(&args, "path")?);
         let mut store = BeadsAdapter::inspect_store(&requested)?;
+        store.source = Some("external".to_owned());
         let mut config = self.inner.config.lock().unwrap();
         if let Some(attached) = config
             .workspaces
@@ -550,10 +646,25 @@ impl WorkspaceHost {
         let store_id = required_string(&args, "store_id")?;
         let mut config = self.inner.config.lock().unwrap();
         let workspace = active_workspace_mut(&mut config, &workspace_id)?;
+        let store = workspace
+            .task_stores
+            .iter()
+            .find(|store| store.id == store_id)
+            .ok_or_else(|| format!("unknown task store {store_id:?}"))?;
+        if task_store_source(store) == "owned" {
+            return Err("the workspace-owned task store cannot be detached".to_owned());
+        }
         let before = workspace.task_stores.len();
         workspace.task_stores.retain(|store| store.id != store_id);
         if before == workspace.task_stores.len() {
             return Err(format!("unknown task store {store_id:?}"));
+        }
+        for repository in &mut workspace.repositories {
+            if repository.task_store_id.as_deref() == Some(&store_id) {
+                repository.task_store_id = None;
+                repository.task_status = "none".to_owned();
+                repository.task_error = None;
+            }
         }
         config::save(&self.inner.data_root, &config).map_err(|error| error.to_string())?;
         Ok(json!({"store_id": store_id, "detached": true}))
@@ -970,7 +1081,13 @@ impl WorkspaceHost {
                         "error": format!("{} is missing", repository.path.display())
                     }));
                 }
-                repository_view(repository)
+                let store = repository.task_store_id.as_ref().and_then(|store_id| {
+                    workspace
+                        .task_stores
+                        .iter()
+                        .find(|store| &store.id == store_id)
+                });
+                repository_view(repository, store)
             })
             .collect::<Vec<_>>();
 
@@ -1562,23 +1679,125 @@ fn workspace_view(workspace: &WorkspaceConfig) -> Value {
         "name": workspace.name,
         "root": workspace.root,
         "archived": workspace.archived,
-        "repositories": workspace.repositories.iter().map(repository_view).collect::<Vec<_>>(),
+        "repositories": workspace.repositories.iter().map(|repository| {
+            let store = repository.task_store_id.as_ref().and_then(|store_id| {
+                workspace.task_stores.iter().find(|store| &store.id == store_id)
+            });
+            repository_view(repository, store)
+        }).collect::<Vec<_>>(),
         "task_stores": workspace.task_stores.iter().map(task_store_view).collect::<Vec<_>>()
     })
 }
 
-fn repository_view(repository: &RepositoryConfig) -> Value {
-    json!({"id":repository.id,"path":repository.path,"exists":repository.path.exists()})
+fn repository_view(repository: &RepositoryConfig, store: Option<&TaskStoreConfig>) -> Value {
+    let exists = repository.path.exists();
+    let (task_status, task_error) = if !exists {
+        (
+            "missing",
+            Some(format!("{} is missing", repository.path.display())),
+        )
+    } else if repository.task_store_id.is_some() && store.is_none() {
+        (
+            "missing",
+            Some("the linked task source is no longer attached".to_owned()),
+        )
+    } else if let Some(store) = store.filter(|store| !store.db_path.exists()) {
+        (
+            "missing",
+            Some(format!("{} is missing", store.db_path.display())),
+        )
+    } else {
+        (
+            repository.task_status.as_str(),
+            repository.task_error.clone(),
+        )
+    };
+    json!({
+        "id":repository.id,
+        "path":repository.path,
+        "exists":exists,
+        "name": if repository.name.is_empty() { repository_name(&repository.path) } else { repository.name.clone() },
+        "task_store_id":repository.task_store_id,
+        "task_status":task_status,
+        "task_error":task_error
+    })
 }
 
 fn task_store_view(store: &TaskStoreConfig) -> Value {
     json!({
         "id": store.id,
+        "name": task_store_name(store),
+        "source": task_store_source(store),
+        "repository_id": store.repository_id,
         "path": store.path,
         "db_path": store.db_path,
         "schema_version": store.schema_version,
         "exists": store.db_path.exists()
     })
+}
+
+struct RepositoryTaskDiscovery {
+    status: String,
+    error: Option<String>,
+    store: Option<TaskStoreConfig>,
+}
+
+fn inspect_repository_task_store(repository_root: &Path) -> RepositoryTaskDiscovery {
+    let beads_dir = repository_root.join(".beads");
+    if !beads_dir.exists() {
+        return RepositoryTaskDiscovery {
+            status: "none".to_owned(),
+            error: None,
+            store: None,
+        };
+    }
+    let db_path = beads_dir.join("beads.db");
+    if !db_path.is_file() {
+        return RepositoryTaskDiscovery {
+            status: "missing".to_owned(),
+            error: Some(format!(
+                "{} exists but has no beads.db",
+                beads_dir.display()
+            )),
+            store: None,
+        };
+    }
+    match BeadsAdapter::inspect_store(&db_path) {
+        Ok(store) => RepositoryTaskDiscovery {
+            status: "linked".to_owned(),
+            error: None,
+            store: Some(store),
+        },
+        Err(error) => RepositoryTaskDiscovery {
+            status: "unsupported".to_owned(),
+            error: Some(error),
+            store: None,
+        },
+    }
+}
+
+fn repository_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Repository");
+    name.strip_suffix(".git").unwrap_or(name).to_owned()
+}
+
+fn task_store_source(store: &TaskStoreConfig) -> &str {
+    store.source.as_deref().unwrap_or(if store.id == "default" {
+        "owned"
+    } else {
+        "external"
+    })
+}
+
+fn task_store_name(store: &TaskStoreConfig) -> String {
+    if task_store_source(store) == "owned" {
+        "Workspace tasks".to_owned()
+    } else {
+        repository_name(&store.path)
+    }
 }
 
 fn task_backend_view(adapter: &BeadsAdapter) -> Value {

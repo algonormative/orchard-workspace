@@ -8,6 +8,11 @@ authenticates an agent or provider.
 The browser UI must build DOM with text nodes and vetted links. Do not interpolate
 workspace records as HTML. A background refresh must patch data in place; it
 must not discard a focused composer, reply context, or a reader's scroll position.
+Every block-code surface uses the shared copyable-code renderer: it writes source
+with `textContent`, copies that exact source, and contains horizontal scrolling
+inside the block so it can never widen the page. Do not add one-off copy buttons.
+Every secondary UI must offer a visible close, cancel, or back action and Escape;
+browser Back restores in-app context without serializing drafts or credentials.
 Use `npm --prefix ui run test:browser` for the local Playwright fixture. The
 backend-owned live-server smoke exercises the embedded Rust bundle separately.
 

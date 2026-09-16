@@ -2,9 +2,11 @@ import "./style.css";
 
 type Json = Record<string, unknown>;
 type Workspace = { id: string; name: string; archived?: boolean };
-type Store = { id: string; path?: string };
+type Store = { id: string; path?: string; name?: string; source?: string };
 type ConversationKind = "channel" | "direct" | "broadcast";
-type Draft = { body: string; kind: string; reference: string };
+type Draft = { body: string; reference: string };
+type DetailView = "tasks" | "activity" | "people" | "form" | "task";
+type Screen = "workspace" | "settings" | "new-workspace" | "home";
 
 const rootElement = document.querySelector<HTMLElement>("#app");
 if (!rootElement) throw new Error("Orchard could not find its app container.");
@@ -30,9 +32,14 @@ const state: {
   unread: Map<string, number>;
   senderId?: string;
   replyTo?: string;
-  detailView?: "tasks" | "ledger" | "people";
+  detailView?: DetailView;
+  screen: Screen;
+  detailEpoch: number;
+  taskRequest: number;
+  threadScroll?: number;
+  composerFocused?: boolean;
   poll?: number;
-} = { workspaces: [], conversationKind: "channel", conversationMessages: [], ledgerMessages: [], drafts: new Map(), workspaceRequest: 0, conversationRequest: 0, ledgerRequest: 0, detailsVisible: false, seenMessageIds: new Set(), unread: new Map() };
+} = { workspaces: [], conversationKind: "channel", conversationMessages: [], ledgerMessages: [], drafts: new Map(), workspaceRequest: 0, conversationRequest: 0, ledgerRequest: 0, detailsVisible: false, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0 };
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
   const node = document.createElement(tag);
@@ -79,6 +86,82 @@ function button(label: string, onClick: () => void | Promise<void>, className = 
   node.addEventListener("click", () => void onClick());
   return node;
 }
+
+/** The only renderer for copyable block code.  Keep its source as text, never HTML. */
+function codeBlock(content: string, label = "Copy") {
+  const block = el("section", "code-block");
+  const pre = el("pre", "connection-value");
+  const code = el("code");
+  code.textContent = content;
+  pre.append(code);
+  const copy = button(label, async () => {
+    try {
+      await navigator.clipboard.writeText(code.textContent || "");
+      notice("Copied.");
+    } catch { notice("Copying is unavailable in this window.", "error"); }
+  }, "copy-button subtle");
+  block.append(pre, copy);
+  return block;
+}
+
+function messageBody(body: string) {
+  const fragment = document.createDocumentFragment();
+  const lines = body.split("\n"); let prose: string[] = []; let code: string[] | undefined; let opener = "";
+  const flushProse = () => { if (prose.length) fragment.append(el("p", "", prose.join("\n"))); prose = []; };
+  for (const line of lines) {
+    if (!code && /^```(?:[A-Za-z0-9_+.-]+)?[ \t]*$/.test(line)) { flushProse(); opener = line; code = []; continue; }
+    if (code && /^```[ \t]*$/.test(line)) { fragment.append(codeBlock(code.join("\n"))); code = undefined; continue; }
+    if (code) code.push(line); else prose.push(line);
+  }
+  if (code) prose.push(opener + (code.length ? `\n${code.join("\n")}` : ""));
+  flushProse();
+  return fragment;
+}
+
+function navigate(screen: Screen, detailView?: DetailView, replace = false) {
+  state.screen = screen;
+  state.detailView = detailView;
+  state.detailEpoch += 1;
+  const route = { screen, detailView: detailView === "form" || detailView === "task" ? "tasks" : detailView, workspaceId: state.workspace?.id };
+  history[replace ? "replaceState" : "pushState"](route, "");
+}
+
+function rememberConversationContext() {
+  const thread = document.querySelector<HTMLElement>("#thread");
+  state.threadScroll = thread?.scrollTop;
+  state.composerFocused = document.activeElement?.getAttribute("aria-label") === "Message";
+}
+function restoreConversationContext() {
+  requestAnimationFrame(() => {
+    const thread = document.querySelector<HTMLElement>("#thread");
+    if (thread && state.threadScroll !== undefined) thread.scrollTop = state.threadScroll;
+    if (state.composerFocused) document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
+  });
+}
+
+window.addEventListener("popstate", (event) => {
+  const route = object(event.state);
+  const workspaceId = string(route.workspaceId);
+  const screen = (string(route.screen) as Screen) || "workspace";
+  const detailView = string(route.detailView) as DetailView || undefined;
+  if (workspaceId && workspaceId !== state.workspace?.id) { void chooseWorkspace(workspaceId, true, false, screen, detailView); return; }
+  state.screen = screen;
+  state.detailView = detailView;
+  state.detailEpoch += 1;
+  if (state.screen === "settings") renderSettings(true);
+  else if (state.screen === "new-workspace") renderEmptyWorkspace(true);
+  else if (state.screen === "home") renderCalmHome(true);
+  else if (state.workspace) renderWorkspace();
+  else renderCalmHome(true);
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (state.screen === "settings") { navigate("workspace"); renderWorkspace(); return; }
+  if (state.screen === "new-workspace") { if (state.workspace) { navigate("workspace"); renderWorkspace(); } else renderCalmHome(); return; }
+  if (state.detailView === "form" || state.detailView === "task") { navigate("workspace", "tasks"); patchDetails(); return; }
+  if (state.detailView) closeDetails();
+});
 
 function safeLink(value: unknown): HTMLAnchorElement | HTMLSpanElement {
   const label = string(value);
@@ -136,8 +219,11 @@ async function refreshWorkspaces() {
 async function initialize() {
   try {
     await refreshWorkspaces();
-    if (!state.workspaces.length) return renderEmptyWorkspace();
-    await chooseWorkspace(state.workspaces[0].id);
+    if (!state.workspaces.length) {
+      navigate("new-workspace", undefined, true);
+      return renderEmptyWorkspace(true);
+    }
+    await chooseWorkspace(state.workspaces[0].id, false, true);
   } catch (error) {
     shell("Orchard is unavailable", "The local workspace service did not respond. Check the connection details in Settings, then try again.");
     const retry = button("Try again", () => void initialize());
@@ -174,7 +260,9 @@ function renderLogin(reason?: string) {
   document.querySelector(".welcome")?.append(form);
 }
 
-function renderEmptyWorkspace() {
+function renderEmptyWorkspace(fromHistory = false) {
+  if (!fromHistory) navigate("new-workspace");
+  const formEpoch = state.detailEpoch;
   shell("Start a workspace", "Create one workspace, then connect the people, channels and task stores that belong in it.");
   const form = el("form", "stack");
   const name = document.createElement("input");
@@ -185,24 +273,37 @@ function renderEmptyWorkspace() {
   name.required = true;
   const submit = button("Create workspace", async () => {
     if (!name.value.trim()) return notice("Give the workspace a name.", "error");
+    if (submit.disabled) return;
+    submit.disabled = true;
     try {
       const result = await call("workspace_create", { name: name.value.trim() });
       const id = identifier(result.workspace);
       if (!id) throw new Error("The service did not return a workspace id.");
       await refreshWorkspaces();
-      await chooseWorkspace(id);
+      if (state.detailEpoch === formEpoch && state.screen === "new-workspace") await chooseWorkspace(id);
     } catch (error) { notice(message(error), "error"); }
+    finally { if (document.contains(submit)) submit.disabled = false; }
   }, "primary");
   form.addEventListener("submit", (event) => { event.preventDefault(); submit.click(); });
-  form.append(name, submit);
+  const cancel = button("Cancel", () => {
+    if (state.workspace) { navigate("workspace"); renderWorkspace(); }
+    else renderCalmHome();
+  }, "subtle");
+  form.append(name, submit, cancel);
   document.querySelector(".welcome")?.append(form);
+}
+
+function renderCalmHome(fromHistory = false) {
+  if (!fromHistory) navigate("home", undefined, true);
+  shell("Orchard", "Create a workspace when you are ready.");
+  document.querySelector(".welcome")?.append(button("Create workspace", () => renderEmptyWorkspace(), "primary"));
 }
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : String(error || "That action could not be completed.");
 }
 
-async function chooseWorkspace(id: string) {
+async function chooseWorkspace(id: string, fromHistory = false, replaceHistory = false, targetScreen: Screen = "workspace", targetDetail?: DetailView) {
   const workspace = state.workspaces.find((item) => item.id === id);
   if (!workspace) return;
   const retainsDrafts = state.workspace?.id === id;
@@ -231,10 +332,15 @@ async function chooseWorkspace(id: string) {
     state.seenMessageIds = new Set(mailList("history").map((entry) => string(object(entry).id)).filter(Boolean));
     state.unread.clear();
   }
-  state.detailView = undefined;
-  state.detailsVisible = false;
+  state.detailView = targetScreen === "workspace" ? targetDetail : undefined;
+  state.screen = targetScreen;
+  state.detailsVisible = Boolean(state.detailView);
   state.senderId = "owner";
-  renderWorkspace();
+  if (targetScreen === "settings") renderSettings(true);
+  else if (targetScreen === "new-workspace") renderEmptyWorkspace(true);
+  else if (targetScreen === "home") renderCalmHome(true);
+  else renderWorkspace();
+  if (!fromHistory) navigate("workspace", undefined, replaceHistory);
   if (state.selectedConversation) {
     patchConversations();
     patchConversation();
@@ -267,7 +373,8 @@ function renderWorkspace() {
     select.append(option);
   }
   select.addEventListener("change", () => void chooseWorkspace(select.value));
-  top.append(el("strong", "brand", "Orchard"), select, button("New workspace", renderEmptyWorkspace), button("Settings", renderSettings));
+  state.screen = "workspace";
+  top.append(el("strong", "brand", "Orchard"), select, button("New workspace", () => { rememberConversationContext(); renderEmptyWorkspace(); }), button("Settings", () => { rememberConversationContext(); renderSettings(); }));
   const noticeBar = el("p", "notice");
   noticeBar.id = "notice";
   noticeBar.dataset.tone = "info";
@@ -282,6 +389,7 @@ function renderWorkspace() {
   layout.append(conversations, main, details);
   root.append(top, layout);
   patchWorkspace();
+  restoreConversationContext();
 }
 
 function snapshotList(...keys: string[]) {
@@ -337,9 +445,9 @@ function patchConversations() {
   panel.append(button(withUnread("Broadcast", "broadcast:broadcast"), () => selectConversation("broadcast", "broadcast"), state.conversationKind === "broadcast" ? "selected conversation-button" : "conversation-button"));
   panel.append(el("h2", "", "Workspace"));
   panel.append(button("Connect agent", showAgentForm, "subtle"));
-  panel.append(button("People", () => { state.detailView = "people"; patchDetails(); }, "subtle"));
-  panel.append(button("Tasks", () => { state.detailView = "tasks"; patchDetails(); }, "subtle"));
-  panel.append(button("Ledger", () => { state.detailView = "ledger"; patchDetails(); }, "subtle"));
+  panel.append(button("People", () => { navigate("workspace", "people"); patchDetails(); }, "subtle"));
+  panel.append(button("Tasks", () => openTasks(), "subtle"));
+  panel.append(button("Activity", () => { navigate("workspace", "activity"); patchDetails(); void loadLedger(); }, "subtle"));
 }
 
 function isSystemChannel(value: unknown) {
@@ -425,10 +533,12 @@ function patchConversation() {
 function patchMessages() {
   const thread = document.querySelector<HTMLElement>("#thread");
   if (!thread || !state.selectedConversation) return;
+  const previousScroll = thread.scrollTop;
   const wasAtBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 32;
   thread.replaceChildren();
   renderMessageList(thread, state.conversationMessages, state.selectedConversation === "__all_direct__");
   if (wasAtBottom) thread.scrollTop = thread.scrollHeight;
+  else thread.scrollTop = previousScroll;
 }
 
 function renderMessageList(thread: HTMLElement, messages: unknown[], showDestination = false) {
@@ -439,9 +549,17 @@ function renderMessageList(thread: HTMLElement, messages: unknown[], showDestina
     const sender = participantName(string(item.sender_id));
     const destination = object(item.destination);
     const recipient = string(destination.id);
-    article.append(el("strong", "", showDestination && recipient ? `${sender} → ${participantName(recipient)}` : sender), el("p", "", string(item.body) || string(item.content)));
-    if (string(item.thread_id)) article.append(el("p", "muted", `Reply thread: ${string(item.thread_id)}`));
-    if (string(item.id) && state.selectedConversation !== "__all_direct__") article.append(button("Reply", () => { state.replyTo = string(item.id); patchConversation(); }, "subtle"));
+    const meta = el("div", "message-meta");
+    meta.append(el("strong", "message-sender", showDestination && recipient ? `${sender} → ${participantName(recipient)}` : sender));
+    const sentAt = string(item.sent_at) || string(item.created_at) || string(item.timestamp);
+    if (sentAt) {
+      const date = new Date(sentAt);
+      meta.append(el("time", "message-time", Number.isNaN(date.valueOf()) ? sentAt : date.toLocaleString([], { dateStyle: "short", timeStyle: "short" })));
+    }
+    article.append(meta);
+    article.append(messageBody(string(item.body) || string(item.content)));
+    if (string(item.thread_id)) article.append(el("p", "muted", "In reply to an earlier message"));
+    if (string(item.id) && state.selectedConversation !== "__all_direct__") article.append(button("Reply", () => { state.replyTo = string(item.id); patchConversation(); }, "subtle reply-button"));
     thread.append(article);
   }
   if (!messages.length) thread.append(el("p", "muted", "No messages yet."));
@@ -457,31 +575,42 @@ function composer() {
   input.rows = 3;
   input.placeholder = state.replyTo ? "Write a reply" : "Write a message";
   input.setAttribute("aria-label", "Message");
+  const key = draftKey();
+  const workspaceId = state.workspace?.id;
   const send = button("Send", async () => {
     if (!input.value.trim() || !state.workspace) return;
+    if (send.disabled) return;
+    send.disabled = true;
     const kind = state.conversationKind;
     const id = state.selectedConversation;
     const target = kind === "broadcast" ? { kind } : { kind, id };
     if (kind !== "broadcast" && !id) return notice("Choose a conversation first.", "error");
     try {
       const refs = reference.value.trim() ? [{ url: reference.value.trim(), label: "Evidence" }] : [];
-      await call("mail_send", { workspace_id: state.workspace.id, request_id: crypto.randomUUID(), sender_id: "owner", destination: target, body: input.value.trim(), kind: messageKind.value, thread_id: state.replyTo, refs });
-      input.value = "";
-      state.drafts.delete(draftKey());
-      state.replyTo = undefined;
+      const body = input.value.trim();
+      const draftAtSubmit = { body: input.value, reference: reference.value };
+      const replyTo = state.replyTo;
+      await call("mail_send", { workspace_id: state.workspace.id, request_id: crypto.randomUUID(), sender_id: "owner", destination: target, body, kind: "message", thread_id: replyTo, refs });
+      const currentDraft = state.drafts.get(key);
+      if (state.workspace?.id !== workspaceId || draftKey() !== key) return;
+      if (currentDraft?.body === draftAtSubmit.body && currentDraft?.reference === draftAtSubmit.reference) {
+        input.value = "";
+        state.drafts.delete(key);
+      }
+      if (state.replyTo === replyTo) state.replyTo = undefined;
       if (state.selectedConversation) await loadHistory(state.selectedConversation);
     } catch (error) { notice(message(error), "error"); }
+    finally { if (document.contains(send)) send.disabled = false; }
   }, "primary");
   form.addEventListener("submit", (event) => { event.preventDefault(); send.click(); });
   const destination = el("p", "muted", `To ${state.conversationKind === "broadcast" ? "everyone" : state.conversationKind === "direct" ? participantName(state.selectedConversation || "") : `# ${state.selectedConversation}`}`);
-  const messageKind = document.createElement("select"); messageKind.setAttribute("aria-label", "Message kind"); for (const value of ["message", "decision", "result", "handoff"]) { const option = document.createElement("option"); option.value = value; option.textContent = value; option.selected = value === (previousDraft?.kind || "message"); messageKind.append(option); }
   const advanced = document.createElement("details");
   advanced.append(el("summary", "", "Add an evidence reference"));
   const reference = document.createElement("input"); reference.type = "url"; reference.placeholder = "https://… (optional)"; reference.value = previousDraft?.reference || ""; reference.setAttribute("aria-label", "Evidence reference URL");
   advanced.append(reference);
-  const saveDraft = () => state.drafts.set(draftKey(), { body: input.value, kind: messageKind.value, reference: reference.value });
-  input.addEventListener("input", saveDraft); messageKind.addEventListener("change", saveDraft); reference.addEventListener("input", saveDraft);
-  form.append(destination, messageKind, input, advanced, send);
+  const saveDraft = () => state.drafts.set(key, { body: input.value, reference: reference.value });
+  input.addEventListener("input", saveDraft); reference.addEventListener("input", saveDraft);
+  form.append(destination, input, advanced, send);
   return form;
 }
 
@@ -492,28 +621,85 @@ function patchDetails() {
   setDetailsVisible(Boolean(state.detailView));
   if (!state.detailView) return;
   if (state.detailView === "people") return patchParticipantPanel(panel);
-  if (state.detailView === "ledger") return patchLedgerPanel(panel);
+  if (state.detailView === "activity") return patchActivityPanel(panel);
+  if (state.detailView === "form" || state.detailView === "task") return;
+  panel.append(button("Close", closeDetails, "close-button subtle"));
   panel.append(el("h2", "", "Tasks"));
   const backendErrors = taskBackendErrors();
   if (backendErrors.length) {
     panel.append(el("p", "error", "Tasks are unavailable: the Beads backend did not start."));
     return;
   }
-  panel.append(button("Attach repository", () => void attachRepository(), "subtle"));
-  panel.append(button("Attach task store", () => void attachTaskStore(), "subtle"));
+  panel.append(button("Add project", () => void attachRepository(), "subtle"));
   const stores = workspaceStores();
-  if (stores.length) panel.append(el("h3", "", "Task stores"));
-  for (const item of stores) {
+  const defaultStore = stores.map(object).find((item) => string(object(item.store).source) === "owned" || identifier(object(item.store)) === "default");
+  if (defaultStore) {
+    panel.append(el("h3", "", "Workspace tasks"));
+    const defaultId = identifier(object(defaultStore).store);
+    if (state.store?.id === defaultId) patchTaskPanel(panel);
+    else panel.append(taskStoreButton(defaultStore, "View tasks"));
+  }
+  const repositories = array(object(state.snapshot?.workspace).repositories).map(object);
+  if (repositories.length) panel.append(el("h3", "", "Projects"));
+  for (const repository of repositories) {
+    const section = el("section", "project-tasks");
+    const name = string(repository.name) || basename(string(repository.path)) || "Project";
+    section.append(el("h4", "", name));
+    const storeId = string(repository.task_store_id);
+    const storeItem = stores.map(object).find((item) => identifier(object(item.store)) === storeId);
+    if (storeItem) {
+      section.append(taskStoreButton(storeItem, "View tasks"));
+      if (state.store?.id === storeId) patchTaskPanel(section);
+    }
+    else section.append(projectTaskStatus(repository));
+    panel.append(section);
+  }
+  const repositoryStoreIds = new Set(repositories.map((repository) => string(repository.task_store_id)).filter(Boolean));
+  const otherStores = stores.map(object).filter((item) => {
     const store = object(object(item).store);
     const id = identifier(store) || string(store.store_id);
-    panel.append(button(string(store.name) || string(store.path) || id, () => {
-      state.store = { id, path: string(store.path) };
-      state.selectedTask = undefined;
-      state.snapshot = { ...state.snapshot, tasks: array(object(item).tasks) };
-      void loadTasks();
-    }, `${state.store?.id === id ? "selected " : ""}subtle store-button`));
+    return id !== (defaultStore ? identifier(object(defaultStore).store) : "") && string(store.source) === "external" && !repositoryStoreIds.has(id);
+  });
+  if (otherStores.length) {
+    panel.append(el("h3", "", "Other task sources"));
+    for (const item of otherStores) {
+      panel.append(taskStoreButton(item));
+      const id = identifier(object(item.store)) || string(object(item.store).store_id);
+      if (state.store?.id === id) patchTaskPanel(panel);
+    }
   }
-  if (state.store) patchTaskPanel(panel);
+}
+
+function closeDetails() { navigate("workspace"); state.store = undefined; state.selectedTask = undefined; patchDetails(); }
+function basename(path: string) { return path.split("/").filter(Boolean).at(-1) || ""; }
+function projectTaskStatus(repository: Json): HTMLElement {
+  const status = string(repository.task_status);
+  if (status === "unsupported") {
+    const detail = document.createElement("details");
+    detail.className = "task-source-error";
+    detail.append(el("summary", "", "Project tasks unavailable"), el("p", "error", string(repository.task_error) || "This project’s task source is unsupported."));
+    return detail;
+  }
+  if (status === "missing") return el("p", "muted", "Project tasks unavailable.");
+  if (status === "none") return el("p", "muted", "No project tasks found.");
+  return el("p", "muted", string(repository.task_error) || "Project tasks unavailable.");
+}
+function taskStoreButton(item: Json, label?: string) {
+  const store = object(item.store); const id = identifier(store) || string(store.store_id);
+  return button(label || string(store.name) || basename(string(store.path)) || id, () => selectStore(item), `${state.store?.id === id ? "selected " : ""}subtle store-button`);
+}
+function openTasks() {
+  navigate("workspace", "tasks");
+  const owned = workspaceStores().map(object).find((item) => string(object(item.store).source) === "owned" || identifier(object(item.store)) === "default");
+  if (owned) selectStore(owned); else patchDetails();
+}
+function selectStore(item: Json) {
+  const store = object(item.store); const id = identifier(store) || string(store.store_id);
+  if (!id) return;
+  state.store = { id, path: string(store.path), name: string(store.name), source: string(store.source) };
+  state.selectedTask = undefined;
+  state.snapshot = { ...state.snapshot, tasks: array(item.tasks) };
+  void loadTasks();
 }
 
 async function loadHistory(channelId: string) {
@@ -538,20 +724,22 @@ async function loadHistory(channelId: string) {
   } catch (error) { notice(message(error), "error"); }
 }
 
-function showInlineForm(title: string, fields: Array<[string, string, string]>, submitLabel: string, action: (values: Record<string, string>) => Promise<void>) {
+function showInlineForm(title: string, fields: Array<[string, string, string]>, submitLabel: string, action: (values: Record<string, string>, stillActive: () => boolean) => Promise<void>) {
   const panel = document.querySelector<HTMLElement>("#details"); if (!panel) return;
+  navigate("workspace", "form");
+  const formEpoch = state.detailEpoch;
   setDetailsVisible(true);
-  panel.replaceChildren(el("h2", "", title));
+  panel.replaceChildren(button("Back", () => { navigate("workspace", "tasks"); patchDetails(); }, "close-button subtle"), el("h2", "", title));
   const form = el("form", "stack"); const inputs = new Map<string, HTMLInputElement>();
   for (const [name, label, placeholder] of fields) { const input = document.createElement("input"); input.name = name; input.required = true; input.placeholder = placeholder; input.setAttribute("aria-label", label); inputs.set(name, input); form.append(el("label", "", label), input); }
-  const submit = button(submitLabel, async () => { const values = Object.fromEntries([...inputs].map(([name, input]) => [name, input.value.trim()])); if (Object.values(values).some((value) => !value)) return notice("Complete each field.", "error"); await action(values); }, "primary");
-  form.addEventListener("submit", (event) => { event.preventDefault(); submit.click(); }); form.append(submit); panel.append(form);
+  const submit = button(submitLabel, async () => { const values = Object.fromEntries([...inputs].map(([name, input]) => [name, input.value.trim()])); if (Object.values(values).some((value) => !value)) return notice("Complete each field.", "error"); if (submit.disabled) return; submit.disabled = true; try { await action(values, () => state.detailEpoch === formEpoch && state.detailView === "form"); } finally { if (document.contains(submit)) submit.disabled = false; } }, "primary");
+  form.addEventListener("submit", (event) => { event.preventDefault(); submit.click(); }); form.append(submit, button("Cancel", () => { navigate("workspace", "tasks"); patchDetails(); }, "subtle")); panel.append(form);
 }
 
 function showChannelForm() {
   if (!state.workspace) return;
-  showInlineForm("New channel", [["name", "Channel name", "Project updates"]], "Create channel", async ({ name }) => {
-    try { await call("mail_channel_create", { workspace_id: state.workspace!.id, request_id: crypto.randomUUID(), name }); await refreshSnapshot(); state.detailView = undefined; patchDetails(); }
+  showInlineForm("New channel", [["name", "Channel name", "Project updates"]], "Create channel", async ({ name }, stillActive) => {
+    try { await call("mail_channel_create", { workspace_id: state.workspace!.id, request_id: crypto.randomUUID(), name }); await refreshSnapshot(); if (stillActive()) closeDetails(); }
     catch (error) { notice(message(error), "error"); }
   });
 }
@@ -562,40 +750,41 @@ function showAgentForm() {
 
 async function attachRepository() {
   if (!state.workspace) return;
-  showInlineForm("Attach repository", [["path", "Repository path", "/path/to/repository"]], "Attach repository", async ({ path }) => {
-    try { await call("repository_attach", { workspace_id: state.workspace!.id, path }); await refreshSnapshot(); }
-    catch (error) { notice(message(error), "error"); }
-  });
-}
-
-async function attachTaskStore() {
-  if (!state.workspace) return;
-  showInlineForm("Attach task store", [["path", "Task store path", "/path/to/.beads"]], "Attach task store", async ({ path }) => {
-    try { await call("task_store_attach", { workspace_id: state.workspace!.id, path }); await refreshSnapshot(); }
+  showInlineForm("Add project", [["path", "Project path", "/path/to/repository"]], "Add project", async ({ path }, stillActive) => {
+    try { await call("repository_attach", { workspace_id: state.workspace!.id, path }); await refreshSnapshot(); if (stillActive()) { navigate("workspace", "tasks"); patchDetails(); } }
     catch (error) { notice(message(error), "error"); }
   });
 }
 
 async function loadTasks() {
   if (!state.workspace || !state.store) return;
+  const workspaceId = state.workspace.id; const storeId = state.store.id; const epoch = state.detailEpoch; const request = ++state.taskRequest;
   try {
-    const tasks = await call("tasks_list", { workspace_id: state.workspace.id, store_id: state.store.id });
-    state.snapshot = { ...state.snapshot, tasks: array(tasks.tasks ?? tasks.items ?? tasks) };
+    const tasks = await call("tasks_list", { workspace_id: workspaceId, store_id: storeId });
+    if (request !== state.taskRequest || epoch !== state.detailEpoch || state.workspace?.id !== workspaceId || state.store?.id !== storeId || state.detailView !== "tasks") return;
+    const loaded = array(tasks.tasks ?? tasks.items ?? tasks);
+    const taskStores = workspaceStores().map((value) => {
+      const item = object(value);
+      return identifier(object(item.store)) === storeId ? { ...item, tasks: loaded } : value;
+    });
+    state.snapshot = { ...state.snapshot, task_stores: taskStores };
     patchDetails();
   } catch (error) { notice(message(error), "error"); }
 }
 
 function patchTaskPanel(panel: HTMLElement) {
   const section = el("section", "task-panel");
-  section.append(el("h3", "", "Tasks"));
-  section.append(button("New task", () => void createTask(), "subtle"));
   const selectedStore = workspaceStores().map(object).find((item) => identifier(object(item.store)) === state.store?.id);
+  const create = button("New task", () => void createTask(), "subtle");
+  create.disabled = !selectedStore || selectedStore.tasks === null;
+  if (create.disabled) create.title = "This task source is unavailable.";
+  section.append(create);
   if (selectedStore && selectedStore.tasks === null) {
     section.append(el("p", "error", "This task store is unavailable. Orchard has not substituted empty task data."));
     panel.append(section);
     return;
   }
-  for (const item of snapshotList("tasks")) {
+  for (const item of array(selectedStore?.tasks)) {
     const task = object(item);
     const id = string(task.task_id) || identifier(task);
     section.append(button(`${id} ${string(task.title)}`, () => { state.selectedTask = id; void showTask(id); }, state.selectedTask === id ? "selected subtle" : "subtle"));
@@ -605,34 +794,41 @@ function patchTaskPanel(panel: HTMLElement) {
 
 async function createTask() {
   if (!state.workspace || !state.store) return;
-  showInlineForm("New task", [["title", "Task title", "Describe the next action"]], "Create task", async ({ title }) => {
-    try { await call("task_create", { workspace_id: state.workspace!.id, store_id: state.store!.id, title, request_id: crypto.randomUUID() }); await loadTasks(); }
+  const workspaceId = state.workspace.id; const storeId = state.store.id;
+  showInlineForm("New task", [["title", "Task title", "Describe the next action"]], "Create task", async ({ title }, stillActive) => {
+    try { await call("task_create", { workspace_id: workspaceId, store_id: storeId, title, request_id: crypto.randomUUID() }); if (stillActive() && state.workspace?.id === workspaceId && state.store?.id === storeId) { navigate("workspace", "tasks"); await loadTasks(); } }
     catch (error) { notice(message(error), "error"); }
   });
 }
 
 async function showTask(taskId: string) {
   if (!state.workspace || !state.store) return;
+  const workspaceId = state.workspace.id; const storeId = state.store.id; const epoch = state.detailEpoch; const request = ++state.taskRequest;
   try {
-    const shown = await call("task_show", { workspace_id: state.workspace.id, store_id: state.store.id, task_id: taskId });
+    const shown = await call("task_show", { workspace_id: workspaceId, store_id: storeId, task_id: taskId });
     const task = object(shown.task ?? shown);
-    const dependencies = await call("task_dependencies", { workspace_id: state.workspace.id, store_id: state.store.id, task_id: taskId });
+    const dependencies = await call("task_dependencies", { workspace_id: workspaceId, store_id: storeId, task_id: taskId });
+    if (request !== state.taskRequest || epoch !== state.detailEpoch || state.workspace?.id !== workspaceId || state.store?.id !== storeId) return;
     const panel = document.querySelector<HTMLElement>("#details");
     if (!panel) return;
+    navigate("workspace", "task");
+    const actionEpoch = state.detailEpoch;
+    state.selectedTask = taskId;
+    panel.replaceChildren(button("Back to tasks", () => { navigate("workspace", "tasks"); patchDetails(); }, "close-button subtle"));
     const detail = el("section", "task-detail");
-    detail.append(el("h3", "", string(task.title) || taskId), el("p", "", string(task.description)));
+    detail.append(el("h3", "", string(task.title) || taskId), messageBody(string(task.description)));
     const status = document.createElement("select"); status.setAttribute("aria-label", "Task status");
     for (const value of ["open", "in_progress", "blocked", "closed"]) { const option = document.createElement("option"); option.value = value; option.textContent = value; option.selected = value === string(task.status); status.append(option); }
     detail.append(status, button("Update status", async () => {
-      try { await call("task_update", { workspace_id: state.workspace!.id, store_id: state.store!.id, task_id: taskId, status: status.value, request_id: crypto.randomUUID() }); await loadTasks(); }
+      try { await call("task_update", { workspace_id: workspaceId, store_id: storeId, task_id: taskId, status: status.value, request_id: crypto.randomUUID() }); if (state.detailEpoch === actionEpoch && state.detailView === "task" && state.workspace?.id === workspaceId && state.store?.id === storeId) { navigate("workspace", "tasks"); await loadTasks(); } }
       catch (error) { notice(message(error), "error"); }
     }, "subtle"));
     const dependencyItems = array(dependencies.dependencies);
     detail.append(el("h4", "", "Dependencies"), dependencyItems.length ? el("p", "muted", dependencyItems.map((item) => string(object(item).task_id) || string(object(item).id) || "task").join(", ")) : el("p", "muted", "No dependencies."));
     detail.append(button("Mark closed", async () => {
       try {
-        await call("task_close", { workspace_id: state.workspace!.id, store_id: state.store!.id, task_id: taskId, request_id: crypto.randomUUID() });
-        await loadTasks();
+        await call("task_close", { workspace_id: workspaceId, store_id: storeId, task_id: taskId, request_id: crypto.randomUUID() });
+        if (state.detailEpoch === actionEpoch && state.detailView === "task" && state.workspace?.id === workspaceId && state.store?.id === storeId) { navigate("workspace", "tasks"); await loadTasks(); }
       } catch (error) { notice(message(error), "error"); }
     }, "subtle"));
     panel.append(detail);
@@ -640,6 +836,7 @@ async function showTask(taskId: string) {
 }
 
 function patchParticipantPanel(panel: HTMLElement) {
+  panel.append(button("Close", closeDetails, "close-button subtle"));
   const participants = mailList("participants");
   panel.append(el("h2", "", "People"));
   if (!participants.length) { panel.append(el("p", "muted", "No connected agents yet.")); return; }
@@ -654,13 +851,33 @@ function patchParticipantPanel(panel: HTMLElement) {
   panel.append(section);
 }
 
-function patchLedgerPanel(panel: HTMLElement) {
-  panel.append(el("h2", "", "Ledger"));
-  const filter = document.createElement("input"); filter.placeholder = "Filter message kind"; filter.setAttribute("aria-label", "Filter ledger kinds");
-  const entries = el("div", "ledger-entries"); const all = state.ledgerMessages;
-  const paint = () => { entries.replaceChildren(); const needle = filter.value.trim().toLowerCase(); for (const value of all) { const item = object(value); if (needle && !string(item.kind).toLowerCase().includes(needle)) continue; const row = el("article", "message"); row.append(el("strong", "", string(item.kind) || "message"), el("p", "", string(item.body))); for (const ref of array(item.refs)) row.append(referenceNode(ref)); entries.append(row); } if (!entries.childElementCount) entries.append(el("p", "muted", "No matching records.")); };
-  filter.addEventListener("input", paint); panel.append(el("p", "muted", "Messages and task receipts are immutable records. Filter by kind."), filter, entries); paint();
-  void loadLedger();
+function patchActivityPanel(panel: HTMLElement) {
+  panel.append(button("Close", closeDetails, "close-button subtle"));
+  panel.append(el("h2", "", "Activity"));
+  const filter = document.createElement("input"); filter.placeholder = "Search messages and references"; filter.setAttribute("aria-label", "Search activity");
+  const entries = el("div", "ledger-entries");
+  entries.id = "activity-entries";
+  filter.addEventListener("input", patchActivityEntries);
+  panel.append(el("p", "muted", "A searchable history of messages, references, and task receipts."), filter, entries);
+  patchActivityEntries();
+}
+
+function patchActivityEntries() {
+  const filter = document.querySelector<HTMLInputElement>('input[aria-label="Search activity"]');
+  const entries = document.querySelector<HTMLElement>("#activity-entries");
+  if (!filter || !entries) return;
+  entries.replaceChildren();
+  const needle = filter.value.trim().toLowerCase();
+  for (const value of state.ledgerMessages) {
+    const item = object(value);
+    const searchable = [string(item.body), string(item.content), string(item.kind), ...array(item.refs).map((ref) => JSON.stringify(ref))].join(" ").toLowerCase();
+    if (needle && !searchable.includes(needle)) continue;
+    const row = el("article", "message");
+    row.append(el("strong", "message-sender", participantName(string(item.sender_id))), messageBody(string(item.body) || string(item.content)));
+    for (const ref of array(item.refs)) row.append(referenceNode(ref));
+    entries.append(row);
+  }
+  if (!entries.childElementCount) entries.append(el("p", "muted", "No matching activity."));
 }
 
 async function loadLedger() {
@@ -670,35 +887,22 @@ async function loadLedger() {
   try {
     const history = await call("mail_history", { workspace_id: workspaceId, latest: true, limit: 200 });
     if (request !== state.ledgerRequest || state.workspace?.id !== workspaceId) return;
-    state.ledgerMessages = array(history.messages).filter((entry) => ["decision", "result", "handoff", "task_intent", "task_result", "task_unknown"].includes(string(object(entry).kind)));
-    if (state.detailView === "ledger") patchDetails();
+    state.ledgerMessages = array(history.messages);
+    if (state.detailView === "activity") patchActivityEntries();
   } catch (error) { notice(message(error), "error"); }
 }
 
-function renderSettings() {
+function renderSettings(fromHistory = false) {
   if (!state.workspace) return;
+  if (!fromHistory) navigate("settings");
   shell("Connection settings", "Use this connection only to configure another already-running agent. Orchard never launches or wakes an agent.");
   const panel = document.querySelector<HTMLElement>(".welcome");
-  const endpoint = el("code", "connection-value", "Not loaded");
-  const token = el("code", "connection-value", "Not loaded");
-  const claudeConfig = el("pre", "connection-value", "Loading configuration…");
-  const codexConfig = el("pre", "connection-value", "Loading configuration…");
-  const codexToml = el("pre", "connection-value", "Loading configuration…");
-  const copyClaude = button("Copy Claude Code command", async () => {
-    try {
-      await navigator.clipboard.writeText(claudeConfig.textContent || ""); notice("Claude Code command copied. Run it in the agent's own environment, then reload its MCP configuration.");
-    }
-    catch { notice("Copying is unavailable in this window.", "error"); }
-  }, "subtle");
-  const copyCodex = button("Copy Codex command", async () => {
-    try { await navigator.clipboard.writeText(codexConfig.textContent || ""); notice("Codex command copied. Export the token before launching the harness, then reload its MCP configuration."); }
-    catch { notice("Copying is unavailable in this window.", "error"); }
-  }, "subtle");
-  const copyToml = button("Copy Codex TOML", async () => {
-    try { await navigator.clipboard.writeText(codexToml.textContent || ""); notice("Codex TOML copied. Add it to the harness configuration, then reconnect or reload MCP as that harness supports."); }
-    catch { notice("Copying is unavailable in this window.", "error"); }
-  }, "subtle");
-  const back = button("Back to workspace", renderWorkspace, "subtle");
+  const endpoint = codeBlock("Not loaded");
+  const token = codeBlock("Not loaded");
+  const claudeConfig = codeBlock("Loading configuration…");
+  const codexConfig = codeBlock("Loading configuration…");
+  const codexToml = codeBlock("Loading configuration…");
+  const back = () => button("Back to workspace", () => { navigate("workspace"); renderWorkspace(); }, "subtle");
   const archive = button("Archive workspace", () => {
     const confirmation = el("section", "stack");
     confirmation.append(el("p", "error", "Archive this workspace? Its data remains on disk, but it leaves the active workspace list."), button("Confirm archive workspace", async () => {
@@ -709,13 +913,13 @@ function renderSettings() {
         if (state.workspaces.length) await chooseWorkspace(state.workspaces[0].id);
         else renderEmptyWorkspace();
       } catch (error) { notice(message(error), "error"); }
-    }, "primary"));
+    }, "primary"), button("Cancel archive", () => confirmation.remove(), "subtle"));
     panel?.append(confirmation);
   }, "subtle");
-  panel?.append(el("h2", "", "Endpoint"), endpoint, el("h2", "", "Credential"), token, el("p", "muted", "Each workspace gets its own MCP alias. Orchard does not launch or wake agents."), el("h3", "", "Claude Code"), claudeConfig, copyClaude, el("h3", "", "Codex"), codexConfig, copyCodex, el("h3", "", "Codex TOML"), codexToml, copyToml, el("p", "muted", "For Codex, ORCHARD_TOKEN must exist in the process that launches the harness; exporting it in a terminal does not change an already-running app. After adding config, reconnect or reload MCP as the harness supports. The agent then calls workspace_info, mail_register or mail_resume, polls mail_inbox, and acknowledges received message ids."), button("Rotate credential", async () => {
+  panel?.append(back(), el("h2", "", "Endpoint"), endpoint, el("h2", "", "Credential"), token, el("p", "muted", "Each workspace gets its own MCP alias. Orchard does not launch or wake agents."), el("h3", "", "Claude Code"), claudeConfig, el("h3", "", "Codex"), codexConfig, el("h3", "", "Codex TOML"), codexToml, el("p", "muted", "For Codex, ORCHARD_TOKEN must exist in the process that launches the harness; exporting it in a terminal does not change an already-running app. After adding config, reconnect or reload MCP as the harness supports. The agent then calls workspace_info, mail_register or mail_resume, polls mail_inbox, and acknowledges received message ids."), button("Rotate credential", async () => {
     try { await call("rotate_token", { workspace_id: state.workspace!.id }); await loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml); notice("Credential rotated. Replace the affected agent configuration, then reconnect it."); }
     catch (error) { notice(message(error), "error"); }
-  }, "primary"), archive, back);
+  }, "primary"), archive, back());
   void loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml);
 }
 
@@ -723,13 +927,16 @@ async function loadConnection(endpoint: HTMLElement, token: HTMLElement, claudeC
   if (!state.workspace) return;
   try {
     const connection = await call("connection_info", { workspace_id: state.workspace.id });
-    endpoint.textContent = string(connection.endpoint) || "Unavailable";
-    token.textContent = string(connection.token) || "Unavailable";
+    const code = (block?: HTMLElement) => block?.querySelector("code");
+    const endpointCode = code(endpoint); const tokenCode = code(token);
+    if (endpointCode) endpointCode.textContent = string(connection.endpoint) || "Unavailable";
+    if (tokenCode) tokenCode.textContent = string(connection.token) || "Unavailable";
     const alias = `orchard-${state.workspace.id.slice(0, 8)}`;
-    const url = endpoint.textContent; const secret = token.textContent;
-    if (claudeConfig) claudeConfig.textContent = `claude mcp add --transport http ${alias} "${url}" --header "Authorization: Bearer ${secret}"`;
-    if (codexConfig) codexConfig.textContent = `export ORCHARD_TOKEN="${secret}"\ncodex mcp add ${alias} --url "${url}" --bearer-token-env-var ORCHARD_TOKEN`;
-    if (codexToml) codexToml.textContent = `[mcp_servers."${alias}"]\nurl = "${url}"\nhttp_headers = { Authorization = "Bearer ${secret}" }`;
+    const url = endpointCode?.textContent || ""; const secret = tokenCode?.textContent || "";
+    const claudeCode = code(claudeConfig); const codexCode = code(codexConfig); const tomlCode = code(codexToml);
+    if (claudeCode) claudeCode.textContent = `claude mcp add --transport http ${alias} "${url}" --header "Authorization: Bearer ${secret}"`;
+    if (codexCode) codexCode.textContent = `export ORCHARD_TOKEN="${secret}"\ncodex mcp add ${alias} --url "${url}" --bearer-token-env-var ORCHARD_TOKEN`;
+    if (tomlCode) tomlCode.textContent = `[mcp_servers."${alias}"]\nurl = "${url}"\nhttp_headers = { Authorization = "Bearer ${secret}" }`;
   } catch (error) { notice(message(error), "error"); }
 }
 
@@ -749,7 +956,7 @@ async function refreshSnapshot() {
   observeMessages(mailList("history"));
   patchConversations();
   if (state.detailView === "tasks") patchDetails();
-  if (state.detailView === "ledger") void loadLedger();
+  if (state.detailView === "activity") void loadLedger();
 }
 
 function startPolling() {
