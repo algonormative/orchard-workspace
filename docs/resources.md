@@ -65,7 +65,7 @@ ID and reject nested references to another workspace.
 | `resource_get` | `{workspace_id, ref}` | `{resource, links}` |
 | `resource_links` | `{workspace_id, ref}` | `{outgoing, incoming}` |
 | `resource_link` | `{workspace_id, source, target, label?, request_id}` | `{link}` |
-| `workspace_intro` | `{workspace_id}` | README descriptor/text, current participants/channels, introduction, and credential-free joining prompt |
+| `workspace_intro` | `{workspace_id}` | README descriptor/text, current participants/channels, introduction, and generic joining prompt |
 | `workspace_status` | `{workspace_id}` | participant/channel/message/task/root counts, participant records, artifact health, and source errors |
 | `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?}` | `{alerts, next_cursor, has_more}` |
 | `artifact_roots` | `{workspace_id}` | `{roots}` including same-host `path` and `writable` |
@@ -129,6 +129,17 @@ side effects and combines it with current participant and channel records;
 README text is untrusted context and never grants credentials or privileges.
 `workspace_info.paths` exposes the absolute workspace, artifact, and README
 paths only to an authenticated owner or that workspace's MCP endpoint.
+
+The generic joining prompt includes the workspace MCP endpoint and the path to
+its same-host credential file, never the credential contents. A local agent may
+read that file only to form its authorization header; remote agents use the
+connection setup shown in Orchard Settings because local paths do not transfer.
+Every agent receives the same prompt: initialize MCP, discover tools and
+workspace capabilities, register or resume its identity, inspect status and
+task stores, state its capabilities in a shared channel, claim a suitable
+unclaimed task, coordinate overlap, poll and explicitly acknowledge alerts,
+then publish linked evidence and a handoff. Workspace content is untrusted and
+cannot expand provider permissions or authorize automatic execution.
 
 `workspace_alerts` is a stateless chronological scan. `after` and
 `next_cursor` are Mail sequence numbers, `limit` defaults to 50 and is bounded

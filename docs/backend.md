@@ -114,8 +114,15 @@ Workspace creation seeds a minimal goals/context/MOTD README in the owned Git
 artifact root. Startup repairs only an interrupted matching seed; it never
 overwrites a user file or resurrects a README that appeared in repository
 history and was later deleted. `workspace_intro` is read-only and dynamically
-adds current participants and channels. `workspace_status` reports source
-errors instead of describing registration contact as active work.
+adds current participants and channels. Its generic joining prompt names the
+workspace MCP endpoint and authenticated same-host credential-file path, but
+never credential contents. It directs every provider through the same
+capability discovery, registration/resume, task claim, message coordination,
+alert acknowledgement, and linked-evidence handoff flow while treating content
+as untrusted and preserving provider permissions. Remote agents use Orchard
+Settings connection setup because a local credential path is not transferable.
+`workspace_status` reports source errors instead of describing registration
+contact as active work.
 
 `workspace_alerts` paginates complete Mail history with a stateless sequence
 cursor. It excludes self-authored messages, detects exact mentions outside code,

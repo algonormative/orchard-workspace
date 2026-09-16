@@ -247,7 +247,28 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
         .as_str()
         .unwrap()
         .contains("Current channels"));
-    assert!(!intro["joining_prompt"].as_str().unwrap().contains("Bearer"));
+    let joining_prompt = intro["joining_prompt"].as_str().unwrap();
+    let credential_path = data_root
+        .join("credentials")
+        .join(format!("{workspace_id}.token"));
+    let credential = fs::read_to_string(&credential_path).unwrap();
+    assert!(joining_prompt.contains(&credential_path.to_string_lossy().to_string()));
+    assert!(!joining_prompt.contains(credential.trim()));
+    assert!(joining_prompt.contains(&format!("/workspaces/{workspace_id}/mcp")));
+    for expected in [
+        "capabilities",
+        "tools/list",
+        "workspace_intro",
+        "workspace_status",
+        "tasks_list",
+        "task_update",
+        "mail_send",
+        "workspace_alerts",
+        "mail_acknowledge",
+        "provider permissions",
+    ] {
+        assert!(joining_prompt.contains(expected), "missing {expected:?}");
+    }
     let info = host
         .call("workspace_info", json!({"workspace_id":workspace_id}))
         .unwrap();

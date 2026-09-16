@@ -1297,7 +1297,7 @@ function renderSettings(fromHistory = false) {
   const readme = el("div", "readme-summary"); readme.append(el("p", "muted", "Loading README…"));
   const joining = codeBlock("Loading joining prompt…");
   const workspacePath = codeBlock("Loading workspace path…");
-  overview.append(el("h2", "", "Workspace introduction"), introduction, readme, el("h2", "", "Joining prompt"), el("p", "muted", "Copy this into an agent that already has this workspace's Orchard MCP configured."), joining, el("h3", "", "Workspace path"), workspacePath);
+  overview.append(el("h2", "", "Workspace introduction"), introduction, readme, el("h2", "", "Joining prompt"), el("p", "muted", "Copy into an agent to connect and discover work. Local agents can use the workspace credential file; other connections use Settings."), joining, el("h3", "", "Workspace path"), workspacePath);
   const endpoint = codeBlock("Not loaded");
   const token = codeBlock("Not loaded");
   const claudeConfig = codeBlock("Loading configuration…");
