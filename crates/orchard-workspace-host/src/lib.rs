@@ -1,8 +1,9 @@
 mod beads;
 mod config;
 mod mcp;
+mod resources;
 
-use axum::extract::{DefaultBodyLimit, Json, Path as AxumPath, State};
+use axum::extract::{DefaultBodyLimit, Json, Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -79,6 +80,7 @@ pub(crate) struct HostInner {
     runtimes: RwLock<HashMap<String, Arc<WorkspaceRuntime>>>,
     store_locks: RwLock<HashMap<PathBuf, Arc<Mutex<()>>>>,
     request_locks: Mutex<HashMap<RequestKey, RequestLock>>,
+    artifact_lock: Mutex<()>,
     endpoint: Mutex<Option<SocketAddr>>,
     owner_token: String,
     owner_token_path: PathBuf,
@@ -218,6 +220,7 @@ impl WorkspaceHost {
                 runtimes: RwLock::new(runtimes),
                 store_locks: RwLock::new(store_locks),
                 request_locks: Mutex::new(HashMap::new()),
+                artifact_lock: Mutex::new(()),
                 endpoint: Mutex::new(None),
                 owner_token,
                 owner_token_path,
@@ -245,6 +248,13 @@ impl WorkspaceHost {
             "task_update" => self.task_update(args),
             "task_close" => self.task_close(args),
             "task_dependencies" => self.task_dependencies(args),
+            "resource_get" => self.resource_get(args),
+            "resource_links" => self.resource_links(args),
+            "resource_link" => self.resource_link(args),
+            "artifact_roots" => self.artifact_roots(args),
+            "artifact_list" => self.artifact_list(args),
+            "artifact_history" => self.artifact_history(args),
+            "artifact_upload" => self.artifact_upload(args),
             "settings_get" => self.settings_get(),
             operation if MAIL_OPERATIONS.contains(&operation) => self.mail_call(operation, args),
             _ => Err(format!("unsupported workspace operation {operation:?}")),
@@ -293,6 +303,14 @@ impl WorkspaceHost {
                     .delete(api_session_delete),
             )
             .route("/api/call", axum::routing::post(api_call))
+            .route(
+                "/api/workspaces/{workspace_id}/resource",
+                axum::routing::get(api_resource_get),
+            )
+            .route(
+                "/api/workspaces/{workspace_id}/artifact/download",
+                axum::routing::get(api_artifact_download),
+            )
             .layer(DefaultBodyLimit::max(1024 * 1024))
             .with_state(self.clone());
         let app = api.merge(ui);
@@ -1151,7 +1169,8 @@ impl WorkspaceHost {
                 "tasks": if self.inner.beads.availability().is_ok() {
                     json!(["tasks_list","task_show","task_create","task_update","task_close","task_dependencies"])
                 } else { json!([]) },
-                "task_dependencies_mutable": false
+                "task_dependencies_mutable": false,
+                "resources": ["resource_get","resource_links","resource_link","artifact_roots","artifact_list","artifact_history","artifact_upload"]
             },
             "task_backend": task_backend_view(&self.inner.beads)
         }))
@@ -1290,6 +1309,16 @@ impl WorkspaceHost {
                 "channel_id": "task-receipts",
                 "name": "Task receipts",
                 "description": "Immutable intents and outcomes for Orchard task mutations"
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+        mail.call(
+            "mail_channel_create",
+            json!({
+                "request_id": "orchard-resource-links-channel-v1",
+                "channel_id": "orchard-system",
+                "name": "Orchard system",
+                "description": "Immutable Orchard resource links"
             }),
         )
         .map_err(|error| error.to_string())?;
@@ -1461,6 +1490,20 @@ struct BrowserCall {
     args: Value,
 }
 
+#[derive(Deserialize)]
+struct ResourceQuery {
+    href: String,
+}
+
+#[derive(Deserialize)]
+struct ArtifactDownloadQuery {
+    root_id: String,
+    path: String,
+    revision: Option<String>,
+    #[serde(default)]
+    preview: bool,
+}
+
 async fn api_session_get(
     State(host): State<Arc<WorkspaceHost>>,
     headers: HeaderMap,
@@ -1551,6 +1594,185 @@ async fn api_call(
         )
             .into_response(),
     }
+}
+
+async fn api_resource_get(
+    State(host): State<Arc<WorkspaceHost>>,
+    AxumPath(workspace_id): AxumPath<String>,
+    Query(query): Query<ResourceQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !safe_resource_get_request(&host, &headers, &workspace_id) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"workspace authentication required"})),
+        )
+            .into_response();
+    }
+    let host_for_call = host.clone();
+    let response = match tokio::task::spawn_blocking(move || {
+        host_for_call.resource_get_href(&workspace_id, &query.href)
+    })
+    .await
+    {
+        Ok(Ok(result)) => Json(json!({"result":result})).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":format!("resource read stopped unexpectedly: {error}")})),
+        )
+            .into_response(),
+    };
+    private_no_store(response)
+}
+
+async fn api_artifact_download(
+    State(host): State<Arc<WorkspaceHost>>,
+    AxumPath(workspace_id): AxumPath<String>,
+    Query(query): Query<ArtifactDownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !safe_resource_get_request(&host, &headers, &workspace_id) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"workspace authentication required"})),
+        )
+            .into_response();
+    }
+    let preview = query.preview;
+    let host_for_call = host.clone();
+    let download = tokio::task::spawn_blocking(move || {
+        host_for_call.artifact_download(
+            &workspace_id,
+            &query.root_id,
+            &query.path,
+            query.revision.as_deref(),
+        )
+    })
+    .await;
+    let download = match download {
+        Ok(Ok(download)) => download,
+        Ok(Err(error)) => {
+            return private_no_store(
+                (StatusCode::BAD_REQUEST, Json(json!({"error":error}))).into_response(),
+            )
+        }
+        Err(error) => {
+            return private_no_store(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":format!("artifact read stopped unexpectedly: {error}")})),
+                )
+                    .into_response(),
+            )
+        }
+    };
+    let resources::ArtifactDownload {
+        bytes,
+        filename,
+        preview_mime,
+    } = download;
+    let (content_type, disposition) = if preview {
+        let Some(mime) = preview_mime else {
+            return private_no_store(
+                (
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    Json(json!({"error":"this artifact has no safe inline preview"})),
+                )
+                    .into_response(),
+            );
+        };
+        (mime, "inline".to_owned())
+    } else {
+        let ascii_filename = filename
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        (
+            "application/octet-stream",
+            format!(
+                "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+                if ascii_filename.is_empty() {
+                    "artifact"
+                } else {
+                    &ascii_filename
+                },
+                resources::percent_encode_header_value(&filename)
+            ),
+        )
+    };
+    let mut response = Body::from(bytes).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition).expect("sanitized disposition is valid"),
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    private_no_store(response)
+}
+
+fn private_no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
+}
+
+fn safe_resource_get_request(
+    host: &WorkspaceHost,
+    headers: &HeaderMap,
+    workspace_id: &str,
+) -> bool {
+    if headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| {
+            host.inner
+                .endpoint
+                .lock()
+                .unwrap()
+                .is_none_or(|endpoint| origin != format!("http://{endpoint}"))
+        })
+    {
+        return false;
+    }
+    if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    {
+        if constant_time_equal(token.as_bytes(), host.inner.owner_token.as_bytes()) {
+            return true;
+        }
+        return host
+            .inner
+            .runtimes
+            .read()
+            .unwrap()
+            .get(workspace_id)
+            .is_some_and(|runtime| {
+                constant_time_equal(token.as_bytes(), runtime.token.read().unwrap().as_bytes())
+            });
+    }
+    browser_session_id(headers).is_some_and(|session| {
+        host.inner
+            .browser_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&session)
+    })
 }
 
 type BrowserValidationError = (StatusCode, &'static str);

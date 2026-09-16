@@ -74,6 +74,12 @@ Direct host operations are an allowlist:
 | `task_update` | `{workspace_id, store_id, task_id, request_id, title?, description?, status?, priority?, add_labels?, remove_labels?}` |
 | `task_close` | `{workspace_id, store_id, task_id, request_id, reason?}` |
 | `task_dependencies` | `{workspace_id, store_id, task_id}`; read-only in this release |
+| `resource_get` / `resource_links` | `{workspace_id, ref}` |
+| `resource_link` | `{workspace_id, source, target, label?, request_id}` |
+| `artifact_roots` | `{workspace_id}` |
+| `artifact_list` | `{workspace_id, root_id, path?, revision?}` |
+| `artifact_history` | `{workspace_id, root_id, path}` |
+| `artifact_upload` | `{workspace_id, path, content_base64, request_id}` |
 | `settings_get` | `{}`; visible JSON without credentials |
 
 All eleven `mail_*` operations from Orchard Mail are also accepted directly
@@ -124,6 +130,10 @@ The executable supplies an embedded static router to
 - `DELETE /api/session` clears the session and cookie.
 - `POST /api/call` accepts `{"operation": "...", "args": {}}` and returns
   `{"result": ...}` or `{"error": "..."}`.
+- `GET /api/workspaces/{workspace_id}/resource?href=...` resolves one
+  canonical resource permalink.
+- `GET /api/workspaces/{workspace_id}/artifact/download?...` serves a bounded
+  authenticated download or a magic-verified safe raster preview.
 
 Every POST and DELETE requires the exact origin
 `http://127.0.0.1:<persisted-port>`; missing and foreign origins are rejected.
@@ -131,11 +141,17 @@ POST bodies must be JSON and are capped at 1 MiB. There is no permissive CORS.
 Browser sessions disappear on restart. The persistent browser owner credential
 is separate from workspace MCP credentials and is never put in a URL.
 
+Resource GET routes accept the owner session/credential or the bearer for the
+exact workspace in the path. They reject a foreign `Origin`, scope nested
+references to the same workspace, and return `Cache-Control: private,
+no-store`. See [resources.md](resources.md) for reference, Git, crosslink,
+upload, and download details.
+
 Each active workspace serves Streamable HTTP MCP at
 `/workspaces/{workspace_id}/mcp` with its own bearer token. Rotation cancels
 existing router sessions before installing the new token; archive and host
 shutdown also cancel sessions. MCP exposes the mail tools, task operations, and
-sanitized `workspace_info`. It does not expose workspace creation/archive,
+sanitized `workspace_info`, resource tools, and artifact tools. It does not expose workspace creation/archive,
 attachments, token rotation, `connection_info`, or browser credentials.
 
 ## Beads safety and retries

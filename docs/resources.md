@@ -1,0 +1,122 @@
+# Orchard resources
+
+Orchard presents workspace content through one resource model while leaving
+Mail, Beads, and Git as their respective systems of record. Resource reads do
+not rewrite source records. Crosslinks are immutable Orchard Mail records in
+the reserved `orchard-system` channel.
+
+## References and permalinks
+
+A resource reference contains `kind` and `workspace_id`, followed by the
+fields required by that kind:
+
+```json
+{"kind":"task","workspace_id":"garden","store_id":"default","task_id":"garden-12"}
+```
+
+Supported kinds are `channel`, `direct`, `broadcast`, `message`, `agent`,
+`task`, `file`, and `url`. Canonical relative hrefs are:
+
+```text
+/w/{workspace}/channels/{id}
+/w/{workspace}/direct/{participant}
+/w/{workspace}/broadcast
+/w/{workspace}/messages/{id}
+/w/{workspace}/agents/{id}
+/w/{workspace}/tasks/{store_id}/{task_id}
+/w/{workspace}/files/{root_id}?path={path}&revision={full Git OID, optional}
+/w/{workspace}/urls?url={HTTP(S) URL}
+```
+
+Path segments and query values use strict RFC 3986 percent encoding with
+uppercase hex; only letters, numbers, `-`, `_`, `.`, and `~` remain raw. The
+parser decodes exactly once and accepts only the canonical re-encoding. File
+paths are normalized relative UTF-8 paths. Absolute paths, backslashes,
+`.`/`..`, repeated or trailing separators, `.git`, `.orchard`, and
+case-insensitive `credentials` components are rejected.
+
+`resource_get` returns a descriptor and its links:
+
+```json
+{
+  "resource": {"ref": {}, "href": "/w/…", "title": "…", "kind": "file", "data": {}},
+  "links": {"outgoing": [], "incoming": []}
+}
+```
+
+Channel and direct data contain their Mail record plus all matching messages;
+broadcast data contains messages; message and agent data contain the underlying
+Mail record; task data contains the Beads task and both dependency directions;
+URL data contains the validated URL. Message and reverse-link lookup paginates
+the complete Mail history rather than relying on the 200-message snapshot.
+
+File data contains `text` when a UTF-8 file is at most 128 KiB, `binary`,
+`byte_length`, optional `revision`, and `download_url`. Magic-verified PNG,
+JPEG, GIF, and WebP files additionally contain `mime_type` and `preview_url`.
+Reads are capped at 8 MiB.
+
+## Operations
+
+Browser calls include `workspace_id`; MCP endpoints inject their own workspace
+ID and reject nested references to another workspace.
+
+| Operation | Arguments | Result |
+| --- | --- | --- |
+| `resource_get` | `{workspace_id, ref}` | `{resource, links}` |
+| `resource_links` | `{workspace_id, ref}` | `{outgoing, incoming}` |
+| `resource_link` | `{workspace_id, source, target, label?, request_id}` | `{link}` |
+| `artifact_roots` | `{workspace_id}` | `{roots}` |
+| `artifact_list` | `{workspace_id, root_id, path?, revision?}` | root, entries, and truncation state |
+| `artifact_history` | `{workspace_id, root_id, path}` | changed versions, newest first |
+| `artifact_upload` | `{workspace_id, path, content_base64, request_id}` | committed file descriptor and revision |
+
+Ordinary Mail attachments may use
+`{"type":"resource","resource":<ResourceRef>,"label":"…"}`. Existing
+`task_ref`, `url`, and file-shaped refs are normalized on read without rewriting
+old messages. Malformed and foreign-workspace refs are ignored. A
+`resource_link` retry with the same semantic request is idempotent; reusing its
+request ID for different arguments is rejected.
+
+## Git artifact roots
+
+`artifact_roots` always describes the workspace-owned `artifacts` root plus
+each attached Git repository. Root IDs for attached repositories are their
+persisted repository IDs. `exists` reports missing roots without creating
+them.
+
+Live attached-root browsing uses tracked index entries and working-copy bytes;
+ignored and untracked files are absent. Bare repositories use their current
+HEAD tree. A full 40-character commit OID pins list and read operations to that
+exact tree. Symlinks and submodules appear as entries and are never followed.
+Every live read checks the root and every path component for symlinks and
+canonical containment before reading. A directory listing returns at most 500
+entries and sets `truncated` when more exist. File history returns at most 100
+changed versions and uses the same `truncated` signal.
+
+Uploads are limited to 512 KiB and only target the workspace-owned `artifacts`
+root. Orchard lazily initializes that Git repository, serializes uploads,
+rejects unrelated dirty state, writes an internal request receipt, and commits
+only the requested path and receipt. A retry returns the original introducing
+commit even after later uploads. A changed payload or path with the same
+request ID is a conflict. If a process stops after writing its receipt but
+before committing, the matching retry completes that bounded transaction.
+Orchard never uploads to or commits an attached repository.
+
+## HTTP reads
+
+`GET /api/workspaces/{workspace_id}/resource?href={encoded canonical href}`
+returns `{"result": <resource_get result>}`. It accepts an owner session or
+owner bearer, or the bearer for that exact workspace. A foreign workspace
+bearer, mismatched href workspace, or foreign `Origin` is rejected.
+
+`GET /api/workspaces/{workspace_id}/artifact/download` accepts `root_id`,
+`path`, and optional `revision`. It sends `application/octet-stream`,
+`Content-Disposition: attachment` with ASCII and RFC 5987 filenames, and
+`X-Content-Type-Options: nosniff`. `preview=true` is accepted only for the four
+magic-verified raster formats and responds inline with the exact safe image
+type. HTML and SVG are never served inline. Resource and artifact responses
+use `Cache-Control: private, no-store`.
+
+All resource operations require an active workspace. The embedded SPA treats
+every `/w/…` path as an application route, including paths containing dots, so
+permalinks reload through the login shell.

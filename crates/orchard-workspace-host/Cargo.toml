@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 axum = "=0.8.6"
+base64 = "=0.22.1"
 fs2 = "=0.4.3"
 git2 = { version = "=0.20.2", default-features = false, features = ["vendored-libgit2"] }
 orchard-mail-core = { version = "=0.1.0", path = "../../vendor/orchard-mail/orchard-mail-core" }

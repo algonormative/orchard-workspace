@@ -24,7 +24,9 @@ async fn asset_or_index(uri: Uri) -> Response {
     if let Some(response) = asset_response(path) {
         return response;
     }
-    if !path.starts_with("api/") && !path.starts_with("workspaces/") && !path.contains('.') {
+    if path.starts_with("w/")
+        || (!path.starts_with("api/") && !path.starts_with("workspaces/") && !path.contains('.'))
+    {
         return asset_response("index.html").expect("index.html is checked by build.rs");
     }
     response(
@@ -112,6 +114,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fallback.status(), StatusCode::OK);
+
+        let dotted_resource = router
+            .clone()
+            .oneshot(
+                Request::get("/w/workspace/channels/review.v1?ignored=query")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dotted_resource.status(), StatusCode::OK);
 
         let missing = router
             .oneshot(Request::get("/missing.js").body(Body::empty()).unwrap())

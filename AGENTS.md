@@ -13,6 +13,12 @@ with `textContent`, copies that exact source, and contains horizontal scrolling
 inside the block so it can never widen the page. Do not add one-off copy buttons.
 Every secondary UI must offer a visible close, cancel, or back action and Escape;
 browser Back restores in-app context without serializing drafts or credentials.
+Resource UI uses canonical workspace-relative resource references and treats
+incoming hrefs as untrusted: parse only Orchard routes for the active workspace.
+The main surface is one resource tree plus one tabbed viewer, never a permanent
+metadata or details column.
+Artifact content is a read-only Markdown, code, or safe-raster viewer with a
+download fallback. Do not add an embedded editor.
 Use `npm --prefix ui run test:browser` for the local Playwright fixture. The
 backend-owned live-server smoke exercises the embedded Rust bundle separately.
 

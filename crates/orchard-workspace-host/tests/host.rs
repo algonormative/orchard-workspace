@@ -1,3 +1,4 @@
+use base64::Engine;
 use orchard_workspace_host::{HostError, WorkspaceHost};
 use rmcp::{
     model::CallToolRequestParams,
@@ -8,6 +9,7 @@ use rmcp::{
 };
 use serde_json::json;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -47,6 +49,29 @@ fn mcp_call(name: &str, arguments: Value) -> CallToolRequestParams {
     CallToolRequestParams::new(name.to_owned()).with_arguments(mcp_arguments(arguments))
 }
 
+fn query_url(base: &str, pairs: &[(&str, &str)]) -> String {
+    let encode = |value: &str| {
+        value
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                    char::from(byte).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect::<String>()
+    };
+    format!(
+        "{base}?{}",
+        pairs
+            .iter()
+            .map(|(key, value)| format!("{}={}", encode(key), encode(value)))
+            .collect::<Vec<_>>()
+            .join("&")
+    )
+}
+
 #[test]
 fn mail_only_mode_is_honest_when_br_is_unavailable() {
     let temp = TempDir::new().unwrap();
@@ -74,18 +99,23 @@ fn snapshot_returns_newest_history_after_more_than_two_hundred_messages() {
         .call("workspace_create", json!({"name":"Busy"}))
         .unwrap();
     let workspace_id = created["workspace"]["id"].as_str().unwrap();
+    let mut oldest_message = String::new();
     for index in 0..205 {
-        host.call(
-            "mail_send",
-            json!({
-                "workspace_id":workspace_id,
-                "request_id":format!("busy-{index}"),
-                "sender_id":"owner",
-                "destination":{"kind":"channel","id":"general"},
-                "body":format!("message-{index}")
-            }),
-        )
-        .unwrap();
+        let sent = host
+            .call(
+                "mail_send",
+                json!({
+                    "workspace_id":workspace_id,
+                    "request_id":format!("busy-{index}"),
+                    "sender_id":"owner",
+                    "destination":{"kind":"channel","id":"general"},
+                    "body":format!("message-{index}")
+                }),
+            )
+            .unwrap();
+        if index == 0 {
+            oldest_message = sent["message"]["id"].as_str().unwrap().to_owned();
+        }
     }
     let snapshot = host
         .call(
@@ -97,6 +127,217 @@ fn snapshot_returns_newest_history_after_more_than_two_hundred_messages() {
     assert_eq!(history.len(), 5);
     assert_eq!(history.first().unwrap()["body"], "message-200");
     assert_eq!(history.last().unwrap()["body"], "message-204");
+    let resource = host
+        .call(
+            "resource_get",
+            json!({
+                "workspace_id":workspace_id,
+                "ref":{"kind":"message","workspace_id":workspace_id,"id":oldest_message}
+            }),
+        )
+        .unwrap();
+    assert_eq!(resource["resource"]["data"]["message"]["body"], "message-0");
+}
+
+#[test]
+fn resource_links_are_bidirectional_idempotent_and_persisted() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let host = WorkspaceHost::open(data_root.clone(), temp.path().join("missing-br")).unwrap();
+    let created = host
+        .call("workspace_create", json!({"name":"Links"}))
+        .unwrap();
+    let workspace_id = created["workspace"]["id"].as_str().unwrap().to_owned();
+    let source = json!({"kind":"channel","workspace_id":workspace_id,"id":"general"});
+    let target =
+        json!({"kind":"url","workspace_id":workspace_id,"url":"https://example.com/reference"});
+    let args = json!({
+        "workspace_id":workspace_id,"source":source,"target":target,
+        "label":"Context","request_id":"link-one"
+    });
+    let first = host.call("resource_link", args.clone()).unwrap();
+    assert_eq!(host.call("resource_link", args).unwrap(), first);
+    let conflict = host.call(
+        "resource_link",
+        json!({
+            "workspace_id":workspace_id,"source":source,
+            "target":{"kind":"url","workspace_id":workspace_id,"url":"https://example.com/other"},
+            "request_id":"link-one"
+        }),
+    );
+    assert!(conflict.is_err());
+    let outgoing = host
+        .call(
+            "resource_links",
+            json!({"workspace_id":workspace_id,"ref":source}),
+        )
+        .unwrap();
+    assert_eq!(outgoing["outgoing"].as_array().unwrap().len(), 1);
+    let incoming = host
+        .call(
+            "resource_links",
+            json!({"workspace_id":workspace_id,"ref":target}),
+        )
+        .unwrap();
+    assert_eq!(incoming["incoming"].as_array().unwrap().len(), 1);
+    drop(host);
+
+    let reopened = WorkspaceHost::open(data_root, temp.path().join("missing-br")).unwrap();
+    let persisted = reopened
+        .call(
+            "resource_links",
+            json!({"workspace_id":workspace_id,"ref":target}),
+        )
+        .unwrap();
+    assert_eq!(persisted["incoming"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn owned_artifact_upload_retries_original_revision_and_reads_exact_versions() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let host = WorkspaceHost::open(data_root.clone(), temp.path().join("missing-br")).unwrap();
+    let created = host
+        .call("workspace_create", json!({"name":"Artifacts"}))
+        .unwrap();
+    let workspace_id = created["workspace"]["id"].as_str().unwrap().to_owned();
+    let workspace_root = PathBuf::from(created["workspace"]["root"].as_str().unwrap());
+    let encode = |value: &[u8]| base64::engine::general_purpose::STANDARD.encode(value);
+    let artifact_root = workspace_root.join("artifacts");
+    fs::create_dir_all(artifact_root.join(".orchard/requests")).unwrap();
+    git2::Repository::init(&artifact_root).unwrap();
+    fs::write(
+        artifact_root.join(".orchard/requests/recover-one.json"),
+        serde_json::to_vec(&json!({
+            "path":"recovered.txt",
+            "fingerprint":format!("{:x}", Sha256::digest(b"recovered"))
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let recovered = host
+        .call(
+            "artifact_upload",
+            json!({
+                "workspace_id":workspace_id,"path":"recovered.txt",
+                "content_base64":encode(b"recovered"),"request_id":"recover-one"
+            }),
+        )
+        .unwrap();
+    assert_eq!(recovered["resource"]["ref"]["path"], "recovered.txt");
+    let first_args = json!({
+        "workspace_id":workspace_id,"path":"notes/example.md",
+        "content_base64":encode(b"first version"),"request_id":"upload-one"
+    });
+    let first = host.call("artifact_upload", first_args.clone()).unwrap();
+    let first_revision = first["resource"]["ref"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    host.call(
+        "artifact_upload",
+        json!({
+            "workspace_id":workspace_id,"path":"other.txt",
+            "content_base64":encode(b"unrelated"),"request_id":"upload-two"
+        }),
+    )
+    .unwrap();
+    let replay = host.call("artifact_upload", first_args).unwrap();
+    assert_eq!(replay["resource"]["ref"]["revision"], first_revision);
+    assert!(host
+        .call(
+            "artifact_upload",
+            json!({
+                "workspace_id":workspace_id,"path":"notes/example.md",
+                "content_base64":encode(b"different"),"request_id":"upload-one"
+            }),
+        )
+        .unwrap_err()
+        .contains("different upload"));
+    let latest = host
+        .call(
+            "artifact_upload",
+            json!({
+                "workspace_id":workspace_id,"path":"notes/example.md",
+                "content_base64":encode(b"second version"),"request_id":"upload-three"
+            }),
+        )
+        .unwrap();
+    assert_ne!(latest["resource"]["ref"]["revision"], first_revision);
+    let pinned = host
+        .call(
+            "resource_get",
+            json!({
+                "workspace_id":workspace_id,
+                "ref":{"kind":"file","workspace_id":workspace_id,"root_id":"artifacts",
+                    "path":"notes/example.md","revision":first_revision}
+            }),
+        )
+        .unwrap();
+    assert_eq!(pinned["resource"]["data"]["text"], "first version");
+    let live = host
+        .call(
+            "resource_get",
+            json!({
+                "workspace_id":workspace_id,
+                "ref":{"kind":"file","workspace_id":workspace_id,"root_id":"artifacts",
+                    "path":"notes/example.md"}
+            }),
+        )
+        .unwrap();
+    assert_eq!(live["resource"]["data"]["text"], "second version");
+    let history = host
+        .call(
+            "artifact_history",
+            json!({"workspace_id":workspace_id,"root_id":"artifacts","path":"notes/example.md"}),
+        )
+        .unwrap();
+    assert_eq!(history["versions"].as_array().unwrap().len(), 2);
+    drop(host);
+
+    let reopened = WorkspaceHost::open(data_root, temp.path().join("missing-br")).unwrap();
+    let replay = reopened
+        .call(
+            "artifact_upload",
+            json!({
+                "workspace_id":workspace_id,"path":"notes/example.md",
+                "content_base64":encode(b"first version"),"request_id":"upload-one"
+            }),
+        )
+        .unwrap();
+    assert_eq!(replay["resource"]["ref"]["revision"], first_revision);
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_artifact_upload_rejects_redirected_git_metadata() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let host =
+        WorkspaceHost::open(temp.path().join("data"), temp.path().join("missing-br")).unwrap();
+    let created = host
+        .call("workspace_create", json!({"name":"Safe artifacts"}))
+        .unwrap();
+    let workspace_id = created["workspace"]["id"].as_str().unwrap();
+    let workspace_root = PathBuf::from(created["workspace"]["root"].as_str().unwrap());
+    let artifact_root = workspace_root.join("artifacts");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&artifact_root).unwrap();
+    git2::Repository::init(&outside).unwrap();
+    symlink(outside.join(".git"), artifact_root.join(".git")).unwrap();
+
+    let error = host
+        .call(
+            "artifact_upload",
+            json!({
+                "workspace_id":workspace_id,"path":"escape.txt","request_id":"escape-one",
+                "content_base64":base64::engine::general_purpose::STANDARD.encode(b"no escape")
+            }),
+        )
+        .unwrap_err();
+    assert!(error.contains(".git must be a local directory"));
+    assert!(!outside.join("escape.txt").exists());
 }
 
 #[test]
@@ -631,6 +872,7 @@ async fn combined_mcp_clients_discover_tasks_and_complete_a_mail_handoff() {
     let tools = client_a.list_all_tools().await.unwrap();
     assert!(tools.iter().any(|tool| tool.name == "workspace_info"));
     assert!(tools.iter().any(|tool| tool.name == "task_create"));
+    assert!(tools.iter().any(|tool| tool.name == "resource_get"));
     assert!(!tools.iter().any(|tool| tool.name == "workspace_archive"));
 
     let discovered = client_a
@@ -640,6 +882,22 @@ async fn combined_mcp_clients_discover_tasks_and_complete_a_mail_handoff() {
     assert_eq!(discovered.is_error, Some(false));
     let discovered = discovered.structured_content.unwrap();
     assert_eq!(discovered["workspace"]["id"], workspace_id);
+    let own_resource = client_a
+        .call_tool(mcp_call(
+            "resource_get",
+            json!({"ref":{"kind":"url","workspace_id":workspace_id,"url":"https://example.com"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(own_resource.is_error, Some(false));
+    let foreign_resource = client_a
+        .call_tool(mcp_call(
+            "resource_get",
+            json!({"ref":{"kind":"url","workspace_id":other_workspace_id,"url":"https://example.com"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(foreign_resource.is_error, Some(true));
     let store_id = discovered["workspace"]["task_stores"][0]["id"]
         .as_str()
         .unwrap()
@@ -840,11 +1098,86 @@ async fn explicit_port_replaces_persisted_port_and_is_reused() {
 async fn browser_api_requires_same_origin_owner_session_and_caps_bodies() {
     let temp = TempDir::new().unwrap();
     let host = Arc::new(WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap());
-    create_workspace(&host, "Browser");
+    let (workspace_id, _, _) = create_workspace(&host, "Browser");
+    let (other_workspace_id, _, _) = create_workspace(&host, "Other browser");
     let server = host.clone().start_server().await.unwrap();
+    let workspace_token = host
+        .call("connection_info", json!({"workspace_id":workspace_id}))
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other_token = host
+        .call(
+            "connection_info",
+            json!({"workspace_id":other_workspace_id}),
+        )
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    host.call(
+        "artifact_upload",
+        json!({
+            "workspace_id":workspace_id,"path":"images/space ü.png","request_id":"browser-image",
+            "content_base64":base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nfixture")
+        }),
+    )
+    .unwrap();
     let bootstrap = host.owner_bootstrap().unwrap();
     let origin = format!("http://{}", bootstrap.endpoint);
     let client = reqwest::Client::new();
+    let resource_endpoint = format!("{origin}/api/workspaces/{workspace_id}/resource");
+    let own_href = format!("/w/{workspace_id}/urls?url=https%3A%2F%2Fexample.com");
+    assert_eq!(
+        client
+            .get(query_url(&resource_endpoint, &[("href", &own_href)]))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let bearer_read = client
+        .get(query_url(&resource_endpoint, &[("href", &own_href)]))
+        .bearer_auth(&workspace_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bearer_read.status(), 200);
+    assert_eq!(bearer_read.headers()["cache-control"], "private, no-store");
+    assert_eq!(
+        client
+            .get(query_url(&resource_endpoint, &[("href", &own_href)]))
+            .bearer_auth(&other_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .get(query_url(&resource_endpoint, &[("href", &own_href)]))
+            .bearer_auth(&workspace_token)
+            .header("origin", "http://example.com")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let foreign_href = format!("/w/{other_workspace_id}/urls?url=https%3A%2F%2Fexample.com");
+    assert_eq!(
+        client
+            .get(query_url(&resource_endpoint, &[("href", &foreign_href)]))
+            .bearer_auth(&workspace_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
 
     let anonymous = client
         .get(format!("{origin}/api/session"))
@@ -900,6 +1233,43 @@ async fn browser_api_requires_same_origin_owner_session_and_caps_bodies() {
         .unwrap()
         .contains("SameSite=Strict"));
 
+    let download_endpoint = format!("{origin}/api/workspaces/{workspace_id}/artifact/download");
+    let download = client
+        .get(query_url(
+            &download_endpoint,
+            &[("root_id", "artifacts"), ("path", "images/space ü.png")],
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), 200);
+    assert_eq!(
+        download.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(download.headers()["x-content-type-options"], "nosniff");
+    assert!(download.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .contains("filename*=UTF-8''space%20%C3%BC.png"));
+    let preview = client
+        .get(query_url(
+            &download_endpoint,
+            &[
+                ("root_id", "artifacts"),
+                ("path", "images/space ü.png"),
+                ("preview", "true"),
+            ],
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), 200);
+    assert_eq!(preview.headers()["content-type"], "image/png");
+    assert_eq!(preview.headers()["content-disposition"], "inline");
+
     let call = client
         .post(format!("{origin}/api/call"))
         .header("origin", &origin)
@@ -914,7 +1284,7 @@ async fn browser_api_requires_same_origin_owner_session_and_caps_bodies() {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
 
     let oversized = client
