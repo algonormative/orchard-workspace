@@ -543,19 +543,63 @@ fn open_local<R: Runtime>(app: &AppHandle<R>, base_url: &str, path: &str) {
 }
 
 fn tray_icon() -> Image<'static> {
-    const SIZE: u32 = 18;
-    let mut rgba = vec![0_u8; (SIZE * SIZE * 4) as usize];
-    for y in 1..SIZE - 1 {
-        for x in 1..SIZE - 1 {
-            let dx = x as i32 - 8;
-            let dy = y as i32 - 9;
-            if dx * dx + dy * dy <= 49 || (x >= 8 && x <= 10 && y <= 5) {
-                let offset = ((y * SIZE + x) * 4) as usize;
-                rgba[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
+    const RASTER_SIZE: u32 = 36;
+    Image::new_owned(render_tray_icon(RASTER_SIZE), RASTER_SIZE, RASTER_SIZE)
+}
+
+fn render_tray_icon(size: u32) -> Vec<u8> {
+    const LOGICAL_SIZE: f32 = 18.0;
+    const STROKE: f32 = 1.35;
+    const CROWNS: [(f32, f32, f32); 3] = [(3.75, 6.0, 1.9), (9.0, 3.0, 1.9), (14.25, 6.0, 1.9)];
+    const SEGMENTS: [((f32, f32), (f32, f32)); 4] = [
+        ((9.0, 5.6), (9.0, 15.4)),
+        ((3.75, 8.55), (9.0, 10.9)),
+        ((14.25, 8.55), (9.0, 10.9)),
+        ((6.6, 15.4), (11.4, 15.4)),
+    ];
+    const SAMPLES: u32 = 4;
+
+    let scale = size as f32 / LOGICAL_SIZE;
+    let mut rgba = vec![0_u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let mut covered = 0_u32;
+            for sample_y in 0..SAMPLES {
+                for sample_x in 0..SAMPLES {
+                    let point = (
+                        (x as f32 + (sample_x as f32 + 0.5) / SAMPLES as f32) / scale,
+                        (y as f32 + (sample_y as f32 + 0.5) / SAMPLES as f32) / scale,
+                    );
+                    let crown = CROWNS.iter().any(|&(cx, cy, radius)| {
+                        let distance = ((point.0 - cx).powi(2) + (point.1 - cy).powi(2)).sqrt();
+                        (distance - radius).abs() <= STROKE / 2.0
+                    });
+                    let branch = SEGMENTS.iter().any(|&(start, end)| {
+                        point_to_segment_distance(point, start, end) <= STROKE / 2.0
+                    });
+                    if crown || branch {
+                        covered += 1;
+                    }
+                }
             }
+            let offset = ((y * size + x) * 4) as usize;
+            rgba[offset + 3] = ((covered * 255) / (SAMPLES * SAMPLES)) as u8;
         }
     }
-    Image::new_owned(rgba, SIZE, SIZE)
+    rgba
+}
+
+fn point_to_segment_distance(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
+    let delta = (end.0 - start.0, end.1 - start.1);
+    let length_squared = delta.0 * delta.0 + delta.1 * delta.1;
+    let projection = (((point.0 - start.0) * delta.0 + (point.1 - start.1) * delta.1)
+        / length_squared)
+        .clamp(0.0, 1.0);
+    let nearest = (
+        start.0 + projection * delta.0,
+        start.1 + projection * delta.1,
+    );
+    ((point.0 - nearest.0).powi(2) + (point.1 - nearest.1).powi(2)).sqrt()
 }
 
 #[cfg(test)]
