@@ -62,6 +62,24 @@ does not prove menu interactions, signing, notarization, GitHub CI, or a
 clean-machine installation. Release credentials and distribution configuration
 remain tracked in `vault-rhtyl`.
 
+## Signed release candidate — 2026-09-17
+
+GitHub Actions run `35231955551` completed the v0.1.0 release workflow from
+commit `252255c`. It built, signed, notarized, and stapled the Apple Silicon app,
+then created a draft GitHub Release. The release remains unpublished pending the
+other-Mac installation check.
+
+The exact draft asset `Orchard-0.1.0-macos-arm64.zip` was downloaded to
+`/private/tmp/orchard-release-0.1.0/`. Its SHA-256 is
+`4d9ecc1e702205755b886fae07c3abb5edebb3b3e205d04b61c4953de7a21afa`, and
+the published checksum file matched. On the development Mac, `codesign` deep
+strict verification passed, `stapler validate` passed, and Gatekeeper accepted
+the app with source `Notarized Developer ID`.
+
+This proves the downloaded draft contains the expected signed and stapled app
+and passes local Gatekeeper assessment. It does not prove installation, first
+launch, menu interaction, quit, or restart on another Mac.
+
 ## Remaining release evidence
 
 Tracked in Vault epic `vault-1qnss`, release gate `vault-1qnss.7`:

@@ -9,8 +9,9 @@ launch or authenticate an agent or provider.
 
 Orchard supports Apple Silicon Macs running macOS 13 or newer.
 
-The first public release is being prepared; there is no signed download yet.
-When a release is published:
+The signed and notarized v0.1.0 release candidate is ready as a GitHub draft.
+It is not public yet because installation on another Mac is still pending. When
+the release is published:
 
 1. Download `Orchard-<version>-macos-arm64.zip` and its `.sha256` file from the
    [latest GitHub Release](https://github.com/algonormative/orchard-workspace/releases/latest).
@@ -20,9 +21,9 @@ When a release is published:
 4. Open Orchard from Applications. It appears in the menu bar rather than the
    Dock; use its menu to open the workspace.
 
-Public builds will be signed with a Developer ID certificate, notarized by
-Apple, and carry a stapled notarization ticket. Orchard stores its default data
-in `~/Library/Application Support/Orchard`.
+The v0.1.0 candidate is signed with a Developer ID certificate, notarized by
+Apple, and carries a stapled notarization ticket. Orchard stores its default
+data in `~/Library/Application Support/Orchard`.
 
 ## Development
 
