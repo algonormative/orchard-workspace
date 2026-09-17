@@ -91,6 +91,92 @@ fn mail_only_mode_is_honest_when_br_is_unavailable() {
 }
 
 #[test]
+fn workspace_recency_is_bounded_validated_and_persists() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let host = WorkspaceHost::open(data_root.clone(), temp.path().join("missing-br")).unwrap();
+    let first = host
+        .call("workspace_create", json!({"name":"First"}))
+        .unwrap()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second = host
+        .call("workspace_create", json!({"name":"Second"}))
+        .unwrap()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    assert_eq!(
+        host.call("workspace_list", json!({})).unwrap()["recent_workspace_ids"],
+        json!([second, first])
+    );
+    host.call("workspace_visit", json!({"workspace_id":first}))
+        .unwrap();
+    host.call("workspace_visit", json!({"workspace_id":first}))
+        .unwrap();
+    assert_eq!(
+        host.call("workspace_list", json!({})).unwrap()["recent_workspace_ids"],
+        json!([first, second])
+    );
+    assert!(host
+        .call("workspace_visit", json!({"workspace_id":"missing"}))
+        .unwrap_err()
+        .contains("unknown workspace"));
+
+    host.call("workspace_archive", json!({"workspace_id":first}))
+        .unwrap();
+    assert!(host
+        .call("workspace_visit", json!({"workspace_id":first}))
+        .unwrap_err()
+        .contains("archived"));
+    assert_eq!(
+        host.call("workspace_list", json!({})).unwrap()["recent_workspace_ids"],
+        json!([second])
+    );
+    drop(host);
+
+    let reopened = WorkspaceHost::open(data_root, temp.path().join("missing-br")).unwrap();
+    assert_eq!(
+        reopened.call("workspace_list", json!({})).unwrap()["recent_workspace_ids"],
+        json!([second])
+    );
+    for index in 0..21 {
+        reopened
+            .call(
+                "workspace_create",
+                json!({"name":format!("Bounded {index}")}),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        reopened.call("workspace_list", json!({})).unwrap()["recent_workspace_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
+}
+
+#[test]
+fn legacy_config_without_workspace_recency_still_opens() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::write(
+        data_root.join("config.json"),
+        "{\"version\":1,\"port\":null,\"workspaces\":[]}",
+    )
+    .unwrap();
+    let host = WorkspaceHost::open(data_root, temp.path().join("missing-br")).unwrap();
+    assert_eq!(
+        host.call("workspace_list", json!({})).unwrap()["recent_workspace_ids"],
+        json!([])
+    );
+}
+
+#[test]
 fn snapshot_returns_newest_history_after_more_than_two_hundred_messages() {
     let temp = TempDir::new().unwrap();
     let host =

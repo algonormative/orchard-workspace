@@ -16,6 +16,7 @@ const participants = [
 const channels = [{ id: "general", name: "general" }, { id: "orchard-system", name: "orchard-system" }];
 let created = false;
 let workspaces = [];
+let recentWorkspaceIds = [];
 let sessionsValid = true;
 let sourceErrors = [];
 let taskBackendAvailable = true;
@@ -43,7 +44,7 @@ const artifactFiles = {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function resetFixture() {
-  created = false; workspaces = []; sessionsValid = true; sourceErrors = []; taskBackendAvailable = true;
+  created = false; workspaces = []; recentWorkspaceIds = []; sessionsValid = true; sourceErrors = []; taskBackendAvailable = true;
   repositories = []; delaySendMs = 0; delayAttachMs = 0; delayTasksMs = 0;
   delayActionMs = 0; uploadFailures = 0; resourceLinks = [];
   tasks = [{ id: "fixture-1", task_id: "fixture-1", title: "Fixture task", status: "open", description: "Fixture task description" }];
@@ -97,8 +98,9 @@ const server = createServer(async (request, response) => {
     const payload = await bodyOf(request);
     const args = payload.args || {};
     calls.push({ operation: payload.operation, args });
-    if (payload.operation === "workspace_list") return send(response, 200, { result: { workspaces: [archivedWorkspace, ...workspaces] } });
-    if (payload.operation === "workspace_create") { created = true; const createdWorkspace = { id: `workspace-${workspaces.length + 1}`, name: args.name || `Workspace ${workspaces.length + 1}` }; workspaces.push(createdWorkspace); return send(response, 200, { result: { workspace: createdWorkspace } }); }
+    if (payload.operation === "workspace_list") return send(response, 200, { result: { workspaces: [archivedWorkspace, ...workspaces], recent_workspace_ids: recentWorkspaceIds } });
+    if (payload.operation === "workspace_create") { created = true; const createdWorkspace = { id: `workspace-${workspaces.length + 1}`, name: args.name || `Workspace ${workspaces.length + 1}` }; workspaces.push(createdWorkspace); recentWorkspaceIds = [createdWorkspace.id, ...recentWorkspaceIds.filter((id) => id !== createdWorkspace.id)].slice(0, 20); return send(response, 200, { result: { workspace: createdWorkspace } }); }
+    if (payload.operation === "workspace_visit") { const selected = workspaces.find((item) => item.id === args.workspace_id); if (!selected) return send(response, 400, { error: "Unknown or archived workspace." }); recentWorkspaceIds = [selected.id, ...recentWorkspaceIds.filter((id) => id !== selected.id)].slice(0, 20); return send(response, 200, { result: { workspace_id: selected.id } }); }
     if (payload.operation === "workspace_archive") { const selected = workspaces.find((item) => item.id === args.workspace_id) || workspace; workspaces = workspaces.filter((item) => item.id !== args.workspace_id); created = workspaces.length > 0; return send(response, 200, { result: { workspace: { ...selected, archived: true } } }); }
     if (payload.operation === "workspace_snapshot") return send(response, 200, { result: snapshot(args.workspace_id) });
     if (payload.operation === "workspace_info") return send(response, 200, { result: { workspace: workspaces.find((item) => item.id === args.workspace_id) || workspace, paths: { workspace: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}`, artifacts: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}/artifacts`, readme: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}/artifacts/README.md` } } });

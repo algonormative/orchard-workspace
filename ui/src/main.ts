@@ -8,7 +8,7 @@ type ConversationKind = "channel" | "direct" | "broadcast";
 type DraftAttachment = { name: string; requestId: string; status: "uploading" | "ready" | "failed"; file?: File; href?: string; ref?: ResourceRef; error?: string };
 type Draft = { body: string; attachment?: DraftAttachment };
 type DetailView = "form";
-type Screen = "workspace" | "settings" | "new-workspace" | "home";
+type Screen = "workspace" | "workspaces" | "settings" | "new-workspace" | "home";
 type CollectionTab = { kind: "collection"; collection: "tasks" | "agents" | "directs"; workspaceId: string; href: string; title: string };
 type AppTab = Descriptor | CollectionTab;
 
@@ -18,6 +18,7 @@ const root: HTMLElement = rootElement;
 
 const state: {
   workspaces: Workspace[];
+  recentWorkspaceIds: string[];
   workspace?: Workspace;
   snapshot?: Json;
   taskBackend?: Json;
@@ -52,7 +53,8 @@ const state: {
   artifactEntries: Map<string, Json[]>;
   artifactExpanded: Set<string>;
   formReturn?: AppTab;
-} = { workspaces: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), workspaceRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, treeExpanded: new Set(["chats", "tasks", "artifacts"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set() };
+  newWorkspaceReturn?: Screen;
+} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), workspaceRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, treeExpanded: new Set(["chats", "tasks", "artifacts"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set() };
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
   const node = document.createElement(tag);
@@ -226,6 +228,12 @@ window.addEventListener("popstate", (event) => {
   const screen = (string(route.screen) as Screen) || "workspace";
   const detailView = string(route.detailView) as DetailView || undefined;
   const resourceHref = string(route.resourceHref);
+  if (screen === "workspaces") {
+    state.workspaceRequest += 1; state.navigationEpoch += 1;
+    state.screen = screen; state.detailView = undefined; state.detailEpoch += 1;
+    renderWorkspaceChooser(true);
+    return;
+  }
   if (workspaceId && workspaceId !== state.workspace?.id) { void chooseWorkspace(workspaceId, true, false, screen, detailView); return; }
   state.screen = screen;
   state.detailView = detailView;
@@ -249,7 +257,8 @@ window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "ArrowLeft") { event.preventDefault(); cycleTab(-1); return; }
   if (event.key !== "Escape") return;
   if (state.screen === "settings") { openWorkspaceFromSettings(); return; }
-  if (state.screen === "new-workspace") { if (state.workspace) { navigate("workspace"); renderWorkspace(); } else renderCalmHome(); return; }
+  if (state.screen === "workspaces") { leaveWorkspaceChooser(); return; }
+  if (state.screen === "new-workspace") { leaveNewWorkspace(); return; }
   if (state.detailView === "form") { const target = state.formReturn; state.formReturn = undefined; state.detailView = undefined; if (target) void activateTab(target, true); else renderEmptyViewer(); return; }
 });
 
@@ -353,6 +362,8 @@ async function refreshWorkspaces() {
   state.workspaces = array(result.workspaces ?? result.items ?? result).map((item) => ({
     id: identifier(item), name: string(object(item).name) || identifier(item), archived: object(item).archived === true,
   })).filter((workspace) => workspace.id && !workspace.archived);
+  const activeIds = new Set(state.workspaces.map((workspace) => workspace.id));
+  state.recentWorkspaceIds = array(result.recent_workspace_ids).map(string).filter((id) => activeIds.has(id));
 }
 
 async function initialize() {
@@ -361,6 +372,10 @@ async function initialize() {
     if (!state.workspaces.length) {
       navigate("new-workspace", undefined, true);
       return renderEmptyWorkspace(true);
+    }
+    if (window.location.pathname === "/workspaces") {
+      navigate("workspaces", undefined, true, "/workspaces");
+      return renderWorkspaceChooser(true);
     }
     const requestedId = workspaceIdFromLocation();
     const requestedWorkspace = requestedId ? state.workspaces.find((workspace) => workspace.id === requestedId) : undefined;
@@ -395,7 +410,10 @@ async function bootstrap() {
 }
 
 function renderEmptyWorkspace(fromHistory = false) {
-  if (!fromHistory) navigate("new-workspace");
+  if (!fromHistory) {
+    state.newWorkspaceReturn = state.screen;
+    navigate("new-workspace");
+  }
   const formEpoch = state.detailEpoch;
   shell("Start a workspace", "Create one workspace, then connect the people, channels and task stores that belong in it.");
   const form = el("form", "stack");
@@ -420,11 +438,17 @@ function renderEmptyWorkspace(fromHistory = false) {
   }, "primary");
   form.addEventListener("submit", (event) => { event.preventDefault(); submit.click(); });
   const cancel = button("Cancel", () => {
-    if (state.workspace) { navigate("workspace"); renderWorkspace(); }
-    else renderCalmHome();
+    leaveNewWorkspace();
   }, "subtle");
   form.append(name, actionRow(submit, cancel));
   document.querySelector(".welcome")?.append(form);
+}
+
+function leaveNewWorkspace() {
+  if (state.newWorkspaceReturn === "workspaces") { state.newWorkspaceReturn = undefined; history.back(); return; }
+  state.newWorkspaceReturn = undefined;
+  if (state.workspace) { navigate("workspace"); renderWorkspace(); }
+  else renderCalmHome();
 }
 
 function renderCalmHome(fromHistory = false) {
@@ -433,12 +457,43 @@ function renderCalmHome(fromHistory = false) {
   document.querySelector(".welcome")?.append(button("Create workspace", () => renderEmptyWorkspace(), "primary"));
 }
 
+function orderedWorkspaces() {
+  const order = new Map(state.recentWorkspaceIds.map((id, index) => [id, index]));
+  return [...state.workspaces].sort((left, right) =>
+    (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.id) ?? Number.MAX_SAFE_INTEGER));
+}
+
+function leaveWorkspaceChooser() {
+  if (state.workspace && string(object(history.state).workspaceId)) { history.back(); return; }
+  if (state.workspace) { void chooseWorkspace(state.workspace.id, false, true); return; }
+  const first = orderedWorkspaces()[0];
+  if (first) void chooseWorkspace(first.id, false, true);
+  else renderCalmHome();
+}
+
+function recordWorkspaceVisit(id: string) {
+  state.recentWorkspaceIds = [id, ...state.recentWorkspaceIds.filter((workspaceId) => workspaceId !== id)].slice(0, 20);
+  void call("workspace_visit", { workspace_id: id }).catch((error) => console.warn("Could not record workspace visit", error));
+}
+
+function renderWorkspaceChooser(fromHistory = false) {
+  if (!fromHistory) navigate("workspaces", undefined, false, "/workspaces");
+  shell("All Workspaces", "Choose a workspace or create a new one.");
+  const list = el("div", "stack workspace-list");
+  for (const workspace of orderedWorkspaces()) {
+    list.append(button(workspace.name, () => void chooseWorkspace(workspace.id), "workspace-choice"));
+  }
+  const back = button("Back", leaveWorkspaceChooser, "subtle");
+  document.querySelector(".welcome")?.append(list, actionRow(button("Create workspace", () => renderEmptyWorkspace(), "primary"), back));
+}
+
 function message(error: unknown) {
   return error instanceof Error ? error.message : String(error || "That action could not be completed.");
 }
 
 async function chooseWorkspace(id: string, fromHistory = false, replaceHistory = false, targetScreen: Screen = "workspace", targetDetail?: DetailView) {
   const requestedUrl = window.location.href;
+  const enteredFromChooser = window.location.pathname === "/workspaces";
   const workspace = state.workspaces.find((item) => item.id === id);
   if (!workspace) return;
   const retainsDrafts = state.workspace?.id === id;
@@ -477,13 +532,15 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
   if (targetScreen === "settings") {
     if (!fromHistory) navigate("settings", undefined, replaceHistory, workspaceSettingsHref(id));
     renderSettings(true);
+    recordWorkspaceVisit(id);
     return;
   }
   if (targetScreen === "new-workspace") { renderEmptyWorkspace(true); return; }
   if (targetScreen === "home") { renderCalmHome(true); return; }
   renderWorkspace();
+  recordWorkspaceVisit(id);
   const requested = parseHref(requestedUrl, id);
-  if (!fromHistory && !requested) navigate("workspace", undefined, replaceHistory, workspaceRootHref(id));
+  if (!fromHistory && !requested && !enteredFromChooser) navigate("workspace", undefined, replaceHistory, workspaceRootHref(id));
   if (requested) { void openResource(descriptor(requested, "Resource"), true); startPolling(); return; }
   if (state.selectedConversation) {
     await selectConversation(state.conversationKind, state.selectedConversation);
@@ -491,6 +548,7 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
     await selectConversation("channel", "general");
   } else {
     state.conversationKind = retainedKind;
+    if (enteredFromChooser) navigate("workspace", undefined, replaceHistory, workspaceRootHref(id));
   }
   startPolling();
 }
@@ -512,7 +570,7 @@ function renderWorkspace() {
   }
   select.addEventListener("change", () => void chooseWorkspace(select.value));
   state.screen = "workspace";
-  top.append(el("strong", "brand", "Orchard"), select, button("New workspace", () => { rememberConversationContext(); renderEmptyWorkspace(); }), button("Settings", () => { rememberConversationContext(); renderSettings(); }));
+  top.append(el("strong", "brand", "Orchard"), select, button("All workspaces", () => { rememberConversationContext(); renderWorkspaceChooser(); }), button("New workspace", () => { rememberConversationContext(); renderEmptyWorkspace(); }), button("Settings", () => { rememberConversationContext(); renderSettings(); }));
   const noticeBar = el("p", "notice");
   noticeBar.id = "notice";
   noticeBar.dataset.tone = "info";

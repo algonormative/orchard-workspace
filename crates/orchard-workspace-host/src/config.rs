@@ -13,6 +13,8 @@ pub(crate) struct AppConfig {
     pub version: u32,
     pub port: Option<u16>,
     #[serde(default)]
+    pub recent_workspace_ids: Vec<String>,
+    #[serde(default)]
     pub workspaces: Vec<WorkspaceConfig>,
 }
 
@@ -21,6 +23,7 @@ impl Default for AppConfig {
         Self {
             version: CONFIG_VERSION,
             port: None,
+            recent_workspace_ids: Vec::new(),
             workspaces: Vec::new(),
         }
     }

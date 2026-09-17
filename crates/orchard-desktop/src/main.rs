@@ -6,9 +6,11 @@ compile_error!("orchard-desktop is a macOS-only menu bar application");
 use orchard_update::UpdateStatus;
 use orchard_workspace_host::{HostError, ServerHandle, WorkspaceHost};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::env;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,6 +24,7 @@ use tauri_plugin_opener::OpenerExt;
 
 const TRAY_ID: &str = "orchard-tray";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_RECENT_WORKSPACES: usize = 5;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct LaunchOptions {
@@ -229,7 +232,44 @@ fn bundled_br_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
 
 fn workspace_entries(host: &WorkspaceHost) -> Result<Vec<WorkspaceMenuEntry>, String> {
     let result = host.call("workspace_list", json!({}))?;
-    Ok(result["workspaces"]
+    Ok(workspace_entries_from_list(&result))
+}
+
+fn workspace_entries_from_list(result: &Value) -> Vec<WorkspaceMenuEntry> {
+    let active = active_workspace_entries_from_list(result);
+    let recent_ids = result["recent_workspace_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    let mut visible = Vec::with_capacity(MAX_RECENT_WORKSPACES);
+    for id in recent_ids {
+        if visible
+            .iter()
+            .any(|entry: &WorkspaceMenuEntry| entry.id == id)
+        {
+            continue;
+        }
+        if let Some(entry) = active.iter().find(|entry| entry.id == id) {
+            visible.push(entry.clone());
+            if visible.len() == MAX_RECENT_WORKSPACES {
+                return visible;
+            }
+        }
+    }
+    for entry in active {
+        if !visible.iter().any(|visible| visible.id == entry.id) {
+            visible.push(entry);
+            if visible.len() == MAX_RECENT_WORKSPACES {
+                break;
+            }
+        }
+    }
+    visible
+}
+
+fn active_workspace_entries_from_list(result: &Value) -> Vec<WorkspaceMenuEntry> {
+    result["workspaces"]
         .as_array()
         .into_iter()
         .flatten()
@@ -241,7 +281,14 @@ fn workspace_entries(host: &WorkspaceHost) -> Result<Vec<WorkspaceMenuEntry>, St
                 root: PathBuf::from(workspace["root"].as_str()?),
             })
         })
-        .collect())
+        .collect()
+}
+
+fn workspace_entry(host: &WorkspaceHost, workspace_id: &str) -> Option<WorkspaceMenuEntry> {
+    let result = host.call("workspace_list", json!({})).ok()?;
+    active_workspace_entries_from_list(&result)
+        .into_iter()
+        .find(|entry| entry.id == workspace_id)
 }
 
 fn workspace_path(id: &str) -> String {
@@ -287,11 +334,7 @@ fn build_menu<R: Runtime>(
     app: &AppHandle<R>,
     entries: &[WorkspaceMenuEntry],
 ) -> tauri::Result<Menu<R>> {
-    let open = MenuItem::with_id(app, "open", "Open Orchard", true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let workspaces = Submenu::new(app, "Workspaces", true)?;
-    let settings = Submenu::new(app, "Settings", !entries.is_empty())?;
-    let copy = Submenu::new(app, "Copy Workspace Info", !entries.is_empty())?;
+    let menu = Menu::new(app)?;
     if entries.is_empty() {
         let create = MenuItem::with_id(
             app,
@@ -300,43 +343,58 @@ fn build_menu<R: Runtime>(
             true,
             None::<&str>,
         )?;
-        workspaces.append(&create)?;
+        menu.append(&create)?;
     } else {
         for entry in entries {
-            let open_id = format!("workspace:{}", entry.id);
-            let settings_id = format!("settings:{}", entry.id);
-            workspaces.append(&MenuItem::with_id(
+            let workspace = Submenu::new(app, &entry.name, true)?;
+            workspace.append(&MenuItem::with_id(
                 app,
-                &open_id,
-                &entry.name,
+                format!("workspace:{}", entry.id),
+                "Open Web UI",
                 true,
                 None::<&str>,
             )?)?;
-            settings.append(&MenuItem::with_id(
+            workspace.append(&MenuItem::with_id(
                 app,
-                &settings_id,
-                &entry.name,
+                format!("settings:{}", entry.id),
+                "Settings",
                 true,
                 None::<&str>,
             )?)?;
-            let tools = Submenu::new(app, &entry.name, true)?;
-            tools.append(&MenuItem::with_id(
+            workspace.append(&MenuItem::with_id(
                 app,
                 format!("copy-prompt:{}", entry.id),
-                "Copy Joining Prompt",
+                "Copy Prompt",
                 true,
                 None::<&str>,
             )?)?;
-            tools.append(&MenuItem::with_id(
+            workspace.append(&MenuItem::with_id(
                 app,
                 format!("copy-path:{}", entry.id),
-                "Copy Workspace Path",
+                "Copy Path",
                 true,
                 None::<&str>,
             )?)?;
-            copy.append(&tools)?;
+            workspace.append(&MenuItem::with_id(
+                app,
+                format!("finder:{}", entry.id),
+                "Show in Finder",
+                true,
+                None::<&str>,
+            )?)?;
+            workspace.append(&MenuItem::with_id(
+                app,
+                format!("editor:{}", entry.id),
+                "Open in Editor",
+                true,
+                None::<&str>,
+            )?)?;
+            menu.append(&workspace)?;
         }
     }
+    let all_workspaces =
+        MenuItem::with_id(app, "all-workspaces", "All Workspaces…", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
     let updates = MenuItem::with_id(
         app,
         "check-updates",
@@ -345,18 +403,11 @@ fn build_menu<R: Runtime>(
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, "quit", "Quit Orchard", true, None::<&str>)?;
-    Menu::with_items(
-        app,
-        &[
-            &open,
-            &separator,
-            &workspaces,
-            &settings,
-            &copy,
-            &updates,
-            &quit,
-        ],
-    )
+    menu.append(&all_workspaces)?;
+    menu.append(&separator)?;
+    menu.append(&updates)?;
+    menu.append(&quit)?;
+    Ok(menu)
 }
 
 fn spawn_menu_refresh<R: Runtime>(app: AppHandle<R>, state: Arc<DesktopState>) {
@@ -396,28 +447,105 @@ fn spawn_menu_refresh<R: Runtime>(app: AppHandle<R>, state: Arc<DesktopState>) {
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     let state = app.state::<Arc<DesktopState>>();
     match id {
-        "open" | "create-workspace" => open_local(app, &state.base_url, "/"),
+        "create-workspace" => open_local(app, &state.base_url, "/"),
+        "all-workspaces" => open_local(app, &state.base_url, "/workspaces"),
         "check-updates" => {
             check_for_updates(app.clone(), state.inner().clone());
         }
         "quit" => graceful_quit(app.clone(), &state),
         _ => {
             if let Some(workspace_id) = id.strip_prefix("workspace:") {
+                visit_workspace(&state.host, workspace_id);
                 open_local(app, &state.base_url, &workspace_path(workspace_id));
             } else if let Some(workspace_id) = id.strip_prefix("settings:") {
+                visit_workspace(&state.host, workspace_id);
                 open_local(app, &state.base_url, &settings_path(workspace_id));
             } else if let Some(workspace_id) = id.strip_prefix("copy-prompt:") {
+                visit_workspace(&state.host, workspace_id);
                 copy_joining_prompt(app, &state.host, workspace_id);
             } else if let Some(workspace_id) = id.strip_prefix("copy-path:") {
-                if let Some(entry) = workspace_entries(&state.host)
-                    .ok()
-                    .and_then(|entries| entries.into_iter().find(|entry| entry.id == workspace_id))
-                {
+                visit_workspace(&state.host, workspace_id);
+                if let Some(entry) = workspace_entry(&state.host, workspace_id) {
                     copy_text(app, entry.root.to_string_lossy().into_owned());
                 }
+            } else if let Some(workspace_id) = id.strip_prefix("finder:") {
+                visit_workspace(&state.host, workspace_id);
+                with_workspace_root(app, &state.host, workspace_id, |root| {
+                    app.opener()
+                        .reveal_item_in_dir(root)
+                        .map_err(|error| format!("Could not show the workspace in Finder: {error}"))
+                });
+            } else if let Some(workspace_id) = id.strip_prefix("editor:") {
+                visit_workspace(&state.host, workspace_id);
+                with_workspace_root(app, &state.host, workspace_id, open_in_editor);
             }
         }
     }
+}
+
+fn visit_workspace(host: &WorkspaceHost, workspace_id: &str) {
+    let _ = host.call("workspace_visit", json!({"workspace_id": workspace_id}));
+}
+
+fn with_workspace_root<R: Runtime>(
+    app: &AppHandle<R>,
+    host: &WorkspaceHost,
+    workspace_id: &str,
+    action: impl FnOnce(&Path) -> Result<(), String>,
+) {
+    let root = workspace_entry(host, workspace_id).map(|entry| entry.root);
+    let result = match root {
+        Some(root) if root.is_dir() => action(&root),
+        Some(root) => Err(format!(
+            "Workspace folder is unavailable: {}",
+            root.display()
+        )),
+        None => Err("Workspace is no longer available.".to_owned()),
+    };
+    if let Err(error) = result {
+        show_action_error(app, &error);
+    }
+}
+
+fn open_in_editor(root: &Path) -> Result<(), String> {
+    let editor = resolve_editor_app().ok_or_else(|| {
+        "No supported editor was found. Install Cursor, Visual Studio Code, or Zed, or set ORCHARD_EDITOR_APP to an application name or path.".to_owned()
+    })?;
+    let output = Command::new("/usr/bin/open")
+        .arg("-a")
+        .arg(&editor)
+        .arg("--")
+        .arg(root)
+        .output()
+        .map_err(|error| format!("Could not open the editor: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() {
+            "The selected editor could not open this workspace.".to_owned()
+        } else {
+            format!("The selected editor could not open this workspace: {detail}")
+        })
+    }
+}
+
+fn resolve_editor_app() -> Option<OsString> {
+    if let Some(configured) = env::var_os("ORCHARD_EDITOR_APP").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(&configured);
+        if path.components().count() > 1 && !path.exists() {
+            return None;
+        }
+        return Some(configured);
+    }
+    ["Cursor", "Visual Studio Code", "Zed"]
+        .into_iter()
+        .find(|name| {
+            Path::new("/Applications")
+                .join(format!("{name}.app"))
+                .is_dir()
+        })
+        .map(OsString::from)
 }
 
 fn graceful_quit<R: Runtime>(app: AppHandle<R>, state: &DesktopState) {
@@ -651,6 +779,53 @@ mod tests {
         let entries = workspace_entries(&host).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "Live menu");
+    }
+
+    #[test]
+    fn recent_workspace_order_is_visible_and_capped_at_five() {
+        let workspaces = (0..7)
+            .map(|index| {
+                json!({
+                    "id": format!("workspace-{index}"),
+                    "name": format!("Workspace {index}"),
+                    "root": format!("/tmp/workspace-{index}"),
+                    "archived": index == 6,
+                })
+            })
+            .collect::<Vec<_>>();
+        let result = json!({
+            "workspaces": workspaces,
+            "recent_workspace_ids": ["workspace-4", "workspace-2", "workspace-6", "unknown"]
+        });
+        let ids = workspace_entries_from_list(&result)
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "workspace-4",
+                "workspace-2",
+                "workspace-0",
+                "workspace-1",
+                "workspace-3"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_recent_ids_use_stable_workspace_order() {
+        let result = json!({
+            "workspaces": [
+                {"id":"a", "name":"A", "root":"/tmp/a", "archived":false},
+                {"id":"b", "name":"B", "root":"/tmp/b", "archived":false}
+            ]
+        });
+        let ids = workspace_entries_from_list(&result)
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["a", "b"]);
     }
 
     #[test]

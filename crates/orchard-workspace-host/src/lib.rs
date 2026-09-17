@@ -234,6 +234,7 @@ impl WorkspaceHost {
         match operation {
             "workspace_list" => self.workspace_list(),
             "workspace_create" => self.workspace_create(args),
+            "workspace_visit" => self.workspace_visit(args),
             "workspace_archive" => self.workspace_archive(args),
             "workspace_snapshot" => self.workspace_snapshot(args),
             "workspace_info" => self.workspace_info(args),
@@ -352,9 +353,41 @@ impl WorkspaceHost {
 
     fn workspace_list(&self) -> Result<Value, String> {
         let config = self.inner.config.lock().unwrap();
+        let recent_workspace_ids = config
+            .recent_workspace_ids
+            .iter()
+            .filter(|id| {
+                config
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.id == id.as_str() && !workspace.archived)
+            })
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>();
         Ok(json!({
-            "workspaces": config.workspaces.iter().map(workspace_view).collect::<Vec<_>>()
+            "workspaces": config.workspaces.iter().map(workspace_view).collect::<Vec<_>>(),
+            "recent_workspace_ids": recent_workspace_ids
         }))
+    }
+
+    fn workspace_visit(&self, args: Value) -> Result<Value, String> {
+        let workspace_id = workspace_id(&args)?;
+        let mut config = self.inner.config.lock().unwrap();
+        active_workspace_mut(&mut config, &workspace_id)?;
+        if config.recent_workspace_ids.first().map(String::as_str) != Some(workspace_id.as_str()) {
+            let mut next_config = config.clone();
+            next_config
+                .recent_workspace_ids
+                .retain(|id| id != &workspace_id);
+            next_config
+                .recent_workspace_ids
+                .insert(0, workspace_id.clone());
+            next_config.recent_workspace_ids.truncate(20);
+            config::save(&self.inner.data_root, &next_config).map_err(|error| error.to_string())?;
+            *config = next_config;
+        }
+        Ok(json!({ "workspace_id": workspace_id }))
     }
 
     fn workspace_create(&self, args: Value) -> Result<Value, String> {
@@ -412,6 +445,11 @@ impl WorkspaceHost {
         {
             let mut config = self.inner.config.lock().unwrap();
             config.workspaces.push(workspace.clone());
+            config
+                .recent_workspace_ids
+                .retain(|workspace_id| workspace_id != &id);
+            config.recent_workspace_ids.insert(0, id.clone());
+            config.recent_workspace_ids.truncate(20);
             config::save(&self.inner.data_root, &config).map_err(|error| error.to_string())?;
         }
         self.inner

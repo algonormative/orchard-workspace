@@ -122,6 +122,43 @@ test("deep permalink opens directly and survives second-workspace switching", as
   await expect(page.locator("#conversation")).not.toContainText("Second workspace");
 });
 
+test("all workspaces chooser supports back and reload without an access key", async ({ page, request }) => {
+  await unlock(page);
+  await page.getByRole("button", { name: "New workspace", exact: true }).click();
+  await page.getByLabel("Workspace name").fill("Second workspace");
+  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  const chats = await openTree(page, "Chats");
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await page.getByLabel("Message").fill("Draft stays local");
+
+  await page.getByRole("button", { name: "All workspaces", exact: true }).click();
+  await expect(page).toHaveURL(/\/workspaces$/);
+  await expect(page.getByRole("heading", { name: "All Workspaces", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Second workspace", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Fixture workspace", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(page.getByLabel("Message")).toHaveValue("Draft stays local");
+
+  await page.getByRole("button", { name: "All workspaces", exact: true }).click();
+  await page.getByRole("button", { name: "Fixture workspace", exact: true }).click();
+  await expect(page).toHaveURL(/\/w\/workspace-1\/channels\/general$/);
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "All Workspaces", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "All Workspaces", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "All Workspaces", exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "All Workspaces", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Local access key")).toHaveCount(0);
+  await page.getByRole("button", { name: "Fixture workspace", exact: true }).click();
+  await expect(page.getByLabel("Workspace", { exact: true })).toHaveValue("workspace-1");
+  const audit = await (await request.get("/fixture/audit")).json();
+  expect(audit.calls.some((entry: { operation: string; args: { workspace_id?: string } }) => entry.operation === "workspace_visit" && entry.args.workspace_id === "workspace-1")).toBeTruthy();
+});
+
 test("workspace settings has a canonical reloadable route and opens README in the viewer", async ({ page, request }) => {
   await unlock(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
