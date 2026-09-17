@@ -47,6 +47,20 @@ license riders. The explicitly recorded replacement is
 arm64 binary SHA-256 is
 `8c1a0024e35535e49cd1ee97cd432f06e28bf623afbac7fcc6c19f7d3c249ba9`.
 
+## Native macOS package — 2026-09-16
+
+An unsigned Apple Silicon `Orchard.app` version 0.1.0 (about 28 MB) was built
+at `/private/tmp/orchard-menu-bar/Orchard.app`. The pinned bundled `br` hash and
+license-notice gates passed. Forty-six Rust workspace tests in release mode and
+nine Playwright fixture tests passed.
+
+With `PATH=/usr/bin:/bin`, the packaged app completed a live loopback smoke for
+keyless workspace creation, task work, and upload. A normal macOS Quit stopped
+the listener; reopening through LaunchServices retained the workspace. This
+does not prove menu interactions, signing, notarization, GitHub CI, or a
+clean-machine installation. Release credentials and distribution configuration
+remain tracked in `vault-rhtyl`.
+
 ## Remaining release evidence
 
 Tracked in Vault epic `vault-1qnss`, release gate `vault-1qnss.7`:

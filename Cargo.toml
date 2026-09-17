@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/orchard-workspace-host", "crates/orchard-server"]
+members = ["crates/orchard-workspace-host", "crates/orchard-server", "crates/orchard-desktop", "crates/orchard-update"]
 default-members = ["crates/orchard-server"]
 exclude = ["vendor/beads-rust", "vendor/orchard-mail"]
 

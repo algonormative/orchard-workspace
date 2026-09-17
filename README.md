@@ -40,6 +40,10 @@ the complete vendored Orchard Mail file set and hashes before compiling. The
 package is a local build artifact; signing, notarization, and publication are
 outside this repository's current evidence.
 
+To build an unsigned Apple Silicon app, run
+`ORCHARD_VERSION=0.1.0 scripts/package-macos-app.sh`. Release signing,
+notarization, and update configuration are in [docs/packaging.md](docs/packaging.md).
+
 Launch a portable package with an external data directory:
 
 ```sh

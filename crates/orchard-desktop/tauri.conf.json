@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Orchard",
+  "version": "0.1.0",
+  "identifier": "dev.orchard.desktop",
+  "build": {
+    "frontendDist": "../../ui/dist"
+  },
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "icon": [],
+    "category": "Productivity",
+    "copyright": "Copyright 2026 Orchard contributors",
+    "resources": {
+      "../../resources/bin/br": "bin/br",
+      "../../THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "../../third-party/BEADS_THIRD_PARTY_LICENSES.txt": "third-party/BEADS_THIRD_PARTY_LICENSES.txt",
+      "../../third-party/FRONTEND_THIRD_PARTY_LICENSES.txt": "third-party/FRONTEND_THIRD_PARTY_LICENSES.txt"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

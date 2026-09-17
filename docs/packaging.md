@@ -37,3 +37,41 @@ From the package directory, run the bundled server with external state:
 ```sh
 ./orchard --data-dir "$HOME/Library/Application Support/Orchard"
 ```
+
+## macOS Apple Silicon release
+
+`ORCHARD_VERSION=1.2.3 scripts/package-macos-app.sh [destination]` creates an
+unsigned `Orchard.app` with `Contents/MacOS/Orchard`, the approved bundled
+`Contents/Resources/bin/br`, and the checked-in notices. Orchard embeds its
+server and browser UI in-process. The app contains no Node, Python, Git, Cargo,
+or provider runtime. The script verifies the pinned `br` hash and notices before
+packaging; `CARGO_TARGET_DIR` may point at an isolated build directory.
+Open `Orchard.app` from Finder or with `open Orchard.app`; it stores its default
+state in `~/Library/Application Support/Orchard`. Quit an existing `orchard`
+CLI server using that data directory before opening the app, because Orchard
+permits only one owner for a data directory.
+
+`scripts/sign-macos-app.sh Orchard.app` signs nested `br` and then the app with
+hardened runtime, verifies it, submits a ZIP to Apple's notary service, and
+staples the accepted ticket. It requires a Developer ID Application identity,
+`APPLE_ID`, `APPLE_TEAM_ID`, and an app-specific password; it cannot create
+those credentials.
+
+The tagged `vMAJOR.MINOR.PATCH` workflow builds, signs, notarizes, staples, and
+publishes `Orchard-MAJOR.MINOR.PATCH-macos-arm64.zip` plus SHA-256 using GitHub
+Release. Before enabling it, set the repository variable
+`ORCHARD_UPDATE_REPOSITORY` to the exact `owner/repository`, and provide
+`APPLE_CERTIFICATE_P12` (base64), `APPLE_CERTIFICATE_PASSWORD`,
+`KEYCHAIN_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and
+`APPLE_APP_SPECIFIC_PASSWORD`. This checkout has no Git remote; no repository
+is assumed or created. The workflow verifies that the `macos-14` runner is
+Apple Silicon before it builds an `arm64` asset.
+
+Updates are checked only when the user invokes the menu action. A distribution
+build embeds `ORCHARD_UPDATE_REPOSITORY`, calls that GitHub repository's latest
+stable release endpoint once with a ten-second timeout and a 1 MiB response cap,
+and accepts only a matching Apple Silicon ZIP. It returns verified release and
+download URLs for the UI to open; it never downloads, installs, or schedules an
+update. Builds without the variable report updates as unconfigured.
+That is expected for local builds until a release repository is chosen and the
+application is rebuilt with the variable.

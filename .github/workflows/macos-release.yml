@@ -1,0 +1,81 @@
+name: macOS release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: /private/tmp/orchard-release-target
+      ORCHARD_UPDATE_REPOSITORY: ${{ vars.ORCHARD_UPDATE_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.16.0'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Validate release configuration
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          test "$(uname -m)" = arm64
+          rustup toolchain install 1.94.0 --profile minimal
+          test -n "$ORCHARD_UPDATE_REPOSITORY"
+          test "$ORCHARD_UPDATE_REPOSITORY" = "${{ github.repository }}"
+          case "$ORCHARD_UPDATE_REPOSITORY" in */*) ;; *) echo 'Set ORCHARD_UPDATE_REPOSITORY to owner/repository.' >&2; exit 64;; esac
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo 'Tags must be vMAJOR.MINOR.PATCH.' >&2; exit 64;; esac
+          version="${TAG#v}"; case "$version" in *[!0-9.]*|*.*.*.*|.*|*.) exit 64;; esac
+          test "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "orchard-desktop") | .version')" = "$version"
+      - name: Set up release tools
+        run: |
+          rustup show active-toolchain | grep -q '^1.94.0'
+          node --version | grep -q '^v22.16.0$'
+          cargo install cargo-about --version 0.9.2 --locked
+      - name: Fetch locked license graphs
+        run: |
+          cargo fetch --locked
+          cargo fetch --manifest-path vendor/beads-rust/Cargo.toml --locked
+      - name: Test release inputs
+        run: |
+          npm --prefix ui ci
+          (cd ui && npx playwright install chromium)
+          npm --prefix ui run test:browser
+          cargo test --workspace --locked
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          test -n "$APPLE_CERTIFICATE_P12"
+          certificate_path="$RUNNER_TEMP/developer-id.p12"; keychain_path="$RUNNER_TEMP/orchard-signing.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"; security set-keychain-settings -lut 21600 "$keychain_path"; security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychain -d user -s "$keychain_path"; security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+      - name: Build, sign, and notarize
+        env:
+          TAG: ${{ github.ref_name }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          ORCHARD_VERSION="${TAG#v}" scripts/package-macos-app.sh dist/Orchard.app
+          scripts/sign-macos-app.sh dist/Orchard.app
+          ditto -c -k --keepParent dist/Orchard.app "dist/Orchard-${TAG#v}-macos-arm64.zip"
+          (cd dist && shasum -a 256 "Orchard-${TAG#v}-macos-arm64.zip" > "Orchard-${TAG#v}-macos-arm64.zip.sha256")
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" "dist/Orchard-${TAG#v}-macos-arm64.zip" "dist/Orchard-${TAG#v}-macos-arm64.zip.sha256" --title "Orchard ${TAG#v}" --generate-notes
+      - name: Remove signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/orchard-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/developer-id.p12"
