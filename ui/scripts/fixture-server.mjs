@@ -88,7 +88,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === "/api/session" && request.method === "GET") return send(response, 200, { authenticated });
   if (url.pathname === "/api/session" && request.method === "POST") {
     const payload = await bodyOf(request);
-    if (payload.token !== "fixture-access-key") return send(response, 401, { error: "The access key was not accepted." });
+    if (payload.token !== undefined && payload.token !== "fixture-access-key") return send(response, 401, { error: "The access key was not accepted." });
     sessionsValid = true;
     return send(response, 200, { authenticated: true }, { "set-cookie": "orchard_session=fixture; HttpOnly; SameSite=Strict; Path=/api" });
   }
@@ -157,4 +157,4 @@ const server = createServer(async (request, response) => {
   return staticFile(url.pathname, response);
 });
 
-server.listen(port, "127.0.0.1", () => console.log(`Orchard fixture http://127.0.0.1:${port} (access key: fixture-access-key)`));
+server.listen(port, "127.0.0.1", () => console.log(`Orchard fixture http://127.0.0.1:${port}`));

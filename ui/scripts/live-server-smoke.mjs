@@ -1,15 +1,12 @@
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "playwright";
 
 const serverUrl = process.env.ORCHARD_TEST_URL;
-const tokenFile = process.env.ORCHARD_TEST_TOKEN_FILE;
-if (!serverUrl || !tokenFile) throw new Error("Set ORCHARD_TEST_URL and ORCHARD_TEST_TOKEN_FILE.");
+if (!serverUrl) throw new Error("Set ORCHARD_TEST_URL.");
 const origin = new URL(serverUrl);
 if (origin.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(origin.hostname)) throw new Error("ORCHARD_TEST_URL must be loopback HTTP.");
 origin.pathname = "/"; origin.search = ""; origin.hash = "";
-const ownerToken = (await readFile(tokenFile, "utf8")).trim();
-if (!ownerToken) throw new Error("Owner credential file is empty.");
 
 const evidenceDir = "/tmp/orchard-evidence"; await mkdir(evidenceDir, { recursive: true });
 const screenshots = { workspace: path.join(evidenceDir, "workspace.png"), task: path.join(evidenceDir, "task.png"), attachment: path.join(evidenceDir, "attachment.png") };
@@ -42,10 +39,6 @@ page.on("console", (entry) => { if (entry.type() === "error") browserErrors.push
 try {
   const documentResponse = await page.goto(origin.href, { waitUntil: "networkidle" });
   if (!documentResponse?.ok() || !(await page.locator('script[type="module"][src]').count())) throw new Error("Embedded UI assets did not load.");
-  await page.getByLabel("Local access key").fill(ownerToken);
-  const login = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/session" && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Unlock", exact: true }).click();
-  if (!(await login).ok()) throw new Error("Owner login failed.");
 
   const selector = page.getByLabel("Workspace", { exact: true });
   await page.getByRole("heading", { name: "Start a workspace" }).or(selector).waitFor();

@@ -18,10 +18,11 @@ cp resources/bin/br target/debug/resources/bin/br
 target/debug/orchard --data-dir /tmp/orchard-data
 ```
 
-The launcher prints the loopback URL, owner access-key file, and access key.
-Paste the key into the local login screen. The credential is never put in a URL
-or browser storage. `--port PORT` deliberately replaces the persisted loopback
-port; without it, Orchard reuses the last port or assigns one on first start.
+The launcher prints the loopback URL. Opening that local URL creates an
+HTTP-only browser session automatically after exact loopback Host and Origin
+checks; there is no access key to copy into the UI. `--port PORT` deliberately
+replaces the persisted loopback port; without it, Orchard reuses the last port
+or assigns one on first start.
 
 The finished package has no runtime dependency on Node, Python, Git, a provider
 CLI, or `PATH`. Rust/Cargo 1.94.0 is pinned in `rust-toolchain.toml`. The approved

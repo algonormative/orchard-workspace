@@ -1609,7 +1609,7 @@ async fn browser_api_requires_same_origin_owner_session_and_caps_bodies() {
 
     let missing_origin = client
         .post(format!("{origin}/api/session"))
-        .json(&json!({"token":bootstrap.token}))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -1617,16 +1617,41 @@ async fn browser_api_requires_same_origin_owner_session_and_caps_bodies() {
     let foreign_origin = client
         .post(format!("{origin}/api/session"))
         .header("origin", "http://example.com")
-        .json(&json!({"token":bootstrap.token}))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
     assert_eq!(foreign_origin.status(), 403);
+    let opaque_origin = client
+        .post(format!("{origin}/api/session"))
+        .header("origin", "null")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(opaque_origin.status(), 403);
+    let wrong_host = client
+        .post(format!("{origin}/api/session"))
+        .header("origin", &origin)
+        .header("host", format!("localhost:{}", bootstrap.endpoint.port()))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_host.status(), 403);
+    let invalid_legacy_credential = client
+        .post(format!("{origin}/api/session"))
+        .header("origin", &origin)
+        .json(&json!({"token":"not-the-owner-credential"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_legacy_credential.status(), 401);
 
     let login = client
         .post(format!("{origin}/api/session"))
         .header("origin", &origin)
-        .json(&json!({"token":bootstrap.token}))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -1649,6 +1674,17 @@ async fn browser_api_requires_same_origin_owner_session_and_caps_bodies() {
         .to_str()
         .unwrap()
         .contains("SameSite=Strict"));
+    assert_eq!(
+        client
+            .get(format!("{origin}/api/session"))
+            .header("origin", "null")
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
 
     let download_endpoint = format!("{origin}/api/workspaces/{workspace_id}/artifact/download");
     let download = client
@@ -1703,6 +1739,18 @@ async fn browser_api_requires_same_origin_owner_session_and_caps_bodies() {
             .len(),
         2
     );
+    assert_eq!(
+        client
+            .post(format!("{origin}/api/call"))
+            .header("origin", "null")
+            .header("cookie", &cookie)
+            .json(&json!({"operation":"workspace_list","args":{}}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
 
     let oversized = client
         .post(format!("{origin}/api/call"))
@@ -1726,6 +1774,16 @@ async fn browser_api_requires_same_origin_owner_session_and_caps_bodies() {
         .await
         .unwrap();
     assert_eq!(logout.status(), 200);
+    let logged_out = client
+        .get(format!("{origin}/api/session"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logged_out.status(), 200);
+    assert_eq!(
+        logged_out.json::<serde_json::Value>().await.unwrap()["authenticated"],
+        false
+    );
     server.shutdown().await.unwrap();
 }
 

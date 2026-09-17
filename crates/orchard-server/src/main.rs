@@ -40,13 +40,7 @@ async fn run() -> Result<(), String> {
         .start_server_with_ui(ui_router())
         .await
         .map_err(|error| format!("cannot start local server: {error}"))?;
-    let bootstrap = host
-        .owner_bootstrap()
-        .map_err(|error| format!("cannot read owner credential: {error}"))?;
-
-    println!("Orchard is running at http://{}/", bootstrap.endpoint);
-    println!("Access key file: {}", bootstrap.credential_path.display());
-    println!("Access key: {}", bootstrap.token);
+    println!("Orchard is running at http://{}/", server.endpoint());
     println!("Press Ctrl-C to stop.");
 
     tokio::signal::ctrl_c()

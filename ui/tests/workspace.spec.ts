@@ -4,11 +4,6 @@ test.beforeEach(async ({ request }) => { await request.post("/fixture/reset"); }
 
 async function unlock(page: Page, create = true) {
   await page.goto("/");
-  const key = page.getByLabel("Local access key");
-  if (await key.isVisible()) {
-    await key.fill("fixture-access-key");
-    await page.getByRole("button", { name: "Unlock", exact: true }).click();
-  }
   await page.getByRole("heading", { name: "Start a workspace" }).or(page.getByLabel("Workspace", { exact: true })).waitFor();
   if (create && await page.getByLabel("Workspace name").isVisible()) {
     await page.getByLabel("Workspace name").fill("Fixture workspace");
@@ -25,6 +20,7 @@ async function openTree(page: Page, name: "Chats" | "Tasks" | "Artifacts") {
 
 test("first launch is calm and exitable", async ({ page }) => {
   await unlock(page, false);
+  await expect(page.getByLabel("Local access key")).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(page.getByRole("heading", { name: "Orchard", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Create workspace", exact: true }).click();
@@ -107,11 +103,9 @@ test("typed attachments and resource links produce navigable backlinks", async (
   await expect(page.locator("#thread").getByRole("button", { name: "message-note.txt", exact: true })).toBeVisible();
 });
 
-test("deep permalink survives login and second-workspace switching", async ({ page, request }) => {
+test("deep permalink opens directly and survives second-workspace switching", async ({ page, request }) => {
   await unlock(page); await request.post("/fixture/revoke");
   await page.goto("/w/workspace-1/files/fixture-root?path=README.md");
-  await page.getByLabel("Local access key").fill("fixture-access-key");
-  await page.getByRole("button", { name: "Unlock", exact: true }).click();
   await expect(page.getByRole("tab", { name: "README.md", exact: true })).toBeVisible();
   await expect(page).toHaveURL(/\/w\/workspace-1\/files\/fixture-root\?path=README.md$/);
   await page.getByRole("button", { name: "New workspace", exact: true }).click();
@@ -137,7 +131,6 @@ test("workspace settings has a canonical reloadable route and opens README in th
   await expect(page.locator(".settings-section .code-block code").first()).toContainText("workspace workspace-1");
   await expect(page.locator(".settings-section .code-block code").nth(1)).toContainText("/private/tmp/orchard-fixture-workspaces/workspace-1");
   await request.post("/fixture/revoke"); await page.reload();
-  await page.getByLabel("Local access key").fill("fixture-access-key"); await page.getByRole("button", { name: "Unlock", exact: true }).click();
   await expect(page).toHaveURL(/\/w\/workspace-1\/settings$/);
   await page.getByRole("button", { name: "Open README", exact: true }).click();
   await expect(page.getByRole("tab", { name: "README.md", exact: true })).toBeVisible();
@@ -159,8 +152,6 @@ test("draft, reply, scroll, reconnect, and polling preserve working context", as
   await page.getByRole("tab", { name: /# general|general/i }).click();
   await expect(composer).toHaveValue("Draft survives reconnect and poll");
   await request.post("/fixture/revoke"); await page.waitForTimeout(8_500);
-  await expect(page.getByRole("heading", { name: "Unlock Orchard" })).toBeVisible();
-  await page.getByLabel("Local access key").fill("fixture-access-key"); await page.getByRole("button", { name: "Unlock" }).click();
   await expect(composer).toHaveValue("Draft survives reconnect and poll");
   await expect.poll(() => page.locator("#thread").evaluate((thread) => thread.scrollTop)).toBeGreaterThan(0);
   const tabs = page.getByRole("tab");

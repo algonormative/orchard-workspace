@@ -1488,9 +1488,10 @@ async fn dynamic_mcp(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct SessionLogin {
-    token: String,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1513,10 +1514,10 @@ struct ArtifactDownloadQuery {
     preview: bool,
 }
 
-async fn api_session_get(
-    State(host): State<Arc<WorkspaceHost>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn api_session_get(State(host): State<Arc<WorkspaceHost>>, headers: HeaderMap) -> Response {
+    if let Err(error) = validate_browser_read(&host, &headers) {
+        return browser_validation_response(error);
+    }
     let authenticated = browser_session_id(&headers).is_some_and(|session| {
         host.inner
             .browser_sessions
@@ -1524,7 +1525,7 @@ async fn api_session_get(
             .unwrap()
             .contains_key(&session)
     });
-    Json(json!({"authenticated":authenticated}))
+    Json(json!({"authenticated":authenticated})).into_response()
 }
 
 async fn api_session_post(
@@ -1535,12 +1536,14 @@ async fn api_session_post(
     if let Err(error) = validate_browser_mutation(&host, &headers) {
         return browser_validation_response(error);
     }
-    if !constant_time_equal(login.token.as_bytes(), host.inner.owner_token.as_bytes()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid owner credential"})),
-        )
-            .into_response();
+    if let Some(token) = login.token {
+        if !constant_time_equal(token.as_bytes(), host.inner.owner_token.as_bytes()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error":"invalid owner credential"})),
+            )
+                .into_response();
+        }
     }
     let session = new_token();
     host.inner
@@ -1744,17 +1747,7 @@ fn safe_resource_get_request(
     headers: &HeaderMap,
     workspace_id: &str,
 ) -> bool {
-    if headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|origin| {
-            host.inner
-                .endpoint
-                .lock()
-                .unwrap()
-                .is_none_or(|endpoint| origin != format!("http://{endpoint}"))
-        })
-    {
+    if validate_browser_read(host, headers).is_err() {
         return false;
     }
     if let Some(token) = headers
@@ -1809,6 +1802,7 @@ fn validate_origin(
     host: &WorkspaceHost,
     headers: &HeaderMap,
 ) -> Result<(), BrowserValidationError> {
+    validate_host(host, headers)?;
     let endpoint = host.inner.endpoint.lock().unwrap();
     let expected = endpoint.map(|endpoint| format!("http://{endpoint}"));
     let observed = headers
@@ -1818,6 +1812,42 @@ fn validate_origin(
         return Err((
             StatusCode::FORBIDDEN,
             "request Origin does not match the Orchard loopback server",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_browser_read(
+    host: &WorkspaceHost,
+    headers: &HeaderMap,
+) -> Result<(), BrowserValidationError> {
+    validate_host(host, headers)?;
+    let endpoint = host.inner.endpoint.lock().unwrap();
+    let expected = endpoint.map(|endpoint| format!("http://{endpoint}"));
+    if let Some(observed) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        if expected.as_deref() != Some(observed) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "request Origin does not match the Orchard loopback server",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_host(host: &WorkspaceHost, headers: &HeaderMap) -> Result<(), BrowserValidationError> {
+    let endpoint = host.inner.endpoint.lock().unwrap();
+    let expected = endpoint.map(|endpoint| endpoint.to_string());
+    let observed = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    if expected.as_deref() != observed {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "request Host does not match the Orchard loopback server",
         ));
     }
     Ok(())

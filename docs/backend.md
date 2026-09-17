@@ -51,9 +51,10 @@ let value = host.call("workspace_list", json!({}))?;
 
 `start_server()` starts the same API without a static UI router. `ServerHandle`
 reports its socket address and performs cancellation plus a bounded three
-second drain on shutdown. `owner_bootstrap()` is for the local executable only:
-it returns the endpoint and owner credential path/value so the CLI can print a
-copyable login bootstrap. It is not exposed through browser or MCP calls.
+second drain on shutdown. `owner_bootstrap()` retains the endpoint and owner
+credential path/value for programmatic compatibility. The executable no longer
+prints that credential, and the browser does not receive it. It is not exposed
+through browser or MCP calls.
 
 Direct host operations are an allowlist:
 
@@ -158,9 +159,11 @@ The executable supplies an embedded static router to
 `start_server_with_ui`. The host owns these same-origin API routes:
 
 - `GET /api/session` returns `{"authenticated": bool}`.
-- `POST /api/session` accepts JSON `{"token": "..."}` and sets a random,
-  in-memory, host-only `orchard_session` cookie with `HttpOnly`,
-  `SameSite=Strict`, and `Path=/api`.
+- `POST /api/session` accepts `{}` from the exact loopback Origin and Host and
+  sets a random, in-memory, host-only `orchard_session` cookie with `HttpOnly`,
+  `SameSite=Strict`, and `Path=/api`. An optional legacy owner token remains
+  accepted for programmatic compatibility; an invalid supplied token is
+  rejected.
 - `DELETE /api/session` clears the session and cookie.
 - `POST /api/call` accepts `{"operation": "...", "args": {}}` and returns
   `{"result": ...}` or `{"error": "..."}`.
@@ -169,11 +172,14 @@ The executable supplies an embedded static router to
 - `GET /api/workspaces/{workspace_id}/artifact/download?...` serves a bounded
   authenticated download or a magic-verified safe raster preview.
 
-Every POST and DELETE requires the exact origin
-`http://127.0.0.1:<persisted-port>`; missing and foreign origins are rejected.
-POST bodies must be JSON and are capped at 1 MiB. There is no permissive CORS.
-Browser sessions disappear on restart. The persistent browser owner credential
-is separate from workspace MCP credentials and is never put in a URL.
+Every browser POST and DELETE requires the exact Origin and Host for
+`http://127.0.0.1:<persisted-port>`; missing, foreign, and opaque origins and
+alternate hosts are rejected. Browser GETs require the exact Host and reject a
+present mismatched Origin. POST bodies must be JSON and are capped at 1 MiB.
+There is no permissive CORS. Browser sessions disappear on restart and the UI
+refreshes them once after an explicit 401 without receiving a credential. The
+retained owner credential is separate from workspace MCP credentials and is
+never put in a URL or frontend bundle.
 
 Resource GET routes accept the owner session/credential or the bearer for the
 exact workspace in the path. They reject a foreign `Origin`, scope nested

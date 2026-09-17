@@ -66,7 +66,25 @@ const array = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 const string = (value: unknown): string => typeof value === "string" ? value : "";
 const identifier = (value: unknown): string => string(object(value).id) || string(object(value).workspace_id) || string(object(value).channel_id);
 
-async function call(operation: string, args: Json = {}): Promise<Json> {
+let sessionRefresh: Promise<boolean> | undefined;
+
+async function ensureBrowserSession(): Promise<boolean> {
+  if (sessionRefresh) return sessionRefresh;
+  const pending = (async () => {
+    const current = await fetch("/api/session", { credentials: "same-origin" });
+    const status = object(await current.json().catch(() => ({})));
+    if (current.ok && status.authenticated === true) return true;
+    const response = await fetch("/api/session", {
+      method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const session = object(await response.json().catch(() => ({})));
+    return response.ok && session.authenticated === true;
+  })();
+  sessionRefresh = pending;
+  try { return await pending; } finally { if (sessionRefresh === pending) sessionRefresh = undefined; }
+}
+
+async function call(operation: string, args: Json = {}, allowSessionRefresh = true): Promise<Json> {
   const csrf = document.querySelector<HTMLMetaElement>('meta[name="orchard-csrf"]')?.content;
   const response = await fetch("/api/call", {
     method: "POST",
@@ -75,11 +93,10 @@ async function call(operation: string, args: Json = {}): Promise<Json> {
     body: JSON.stringify({ operation, args }),
   });
   const payload = object(await response.json().catch(() => ({})));
-  if (response.status === 401) {
-    if (state.poll) window.clearInterval(state.poll);
-    renderLogin("Your local session expired after the server restarted. Unlock Orchard again; any unfinished draft remains available.");
-    throw new Error("Your session expired. Unlock Orchard again.");
+  if (response.status === 401 && allowSessionRefresh && await ensureBrowserSession()) {
+    return call(operation, args, false);
   }
+  if (response.status === 401) throw new Error("The local browser session could not be refreshed.");
   if (!response.ok) {
     throw new Error(string(payload.error) || `Orchard service returned ${response.status}.`);
   }
@@ -369,31 +386,12 @@ function workspaceIdFromLocation(): string | undefined {
 
 async function bootstrap() {
   try {
-    const response = await fetch("/api/session", { credentials: "same-origin" });
-    const session = object(await response.json().catch(() => ({})));
-    if (!response.ok || !session.authenticated) return renderLogin();
+    if (!await ensureBrowserSession()) throw new Error("The local browser session could not be started.");
     await initialize();
   } catch (error) {
     shell("Orchard is unavailable", "The local Orchard server did not respond.");
     document.querySelector(".welcome")?.append(el("p", "error", message(error)));
   }
-}
-
-function renderLogin(reason?: string) {
-  shell("Unlock Orchard", reason || "Paste the local access key printed by the Orchard server. It is used only to create this browser session and is never placed in a URL or browser storage.");
-  const form = el("form", "stack");
-  const token = document.createElement("input"); token.type = "password"; token.autocomplete = "off"; token.placeholder = "Local access key"; token.required = true; token.setAttribute("aria-label", "Local access key");
-  const submit = button("Unlock", async () => {
-    try {
-      const response = await fetch("/api/session", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: token.value }) });
-      const payload = object(await response.json().catch(() => ({})));
-      token.value = "";
-      if (!response.ok) throw new Error(string(payload.error) || "The access key was not accepted.");
-      await initialize();
-    } catch (error) { notice(message(error), "error"); }
-  }, "primary");
-  form.addEventListener("submit", (event) => { event.preventDefault(); submit.click(); }); form.append(token, submit);
-  document.querySelector(".welcome")?.append(form);
 }
 
 function renderEmptyWorkspace(fromHistory = false) {
