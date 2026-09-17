@@ -2,14 +2,19 @@ name: macOS release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   release:
     runs-on: macos-14
     timeout-minutes: 45
     env:
-      CARGO_TARGET_DIR: /private/tmp/orchard-release-target
+      CARGO_TARGET_DIR: /private/tmp/orchard-ux-target
+      CARGO_INCREMENTAL: '0'
       ORCHARD_UPDATE_REPOSITORY: ${{ vars.ORCHARD_UPDATE_REPOSITORY }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -20,6 +25,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - name: Validate release configuration
         env:
+          EVENT_NAME: ${{ github.event_name }}
           TAG: ${{ github.ref_name }}
         run: |
           test "$(uname -m)" = arm64
@@ -27,9 +33,17 @@ jobs:
           test -n "$ORCHARD_UPDATE_REPOSITORY"
           test "$ORCHARD_UPDATE_REPOSITORY" = "${{ github.repository }}"
           case "$ORCHARD_UPDATE_REPOSITORY" in */*) ;; *) echo 'Set ORCHARD_UPDATE_REPOSITORY to owner/repository.' >&2; exit 64;; esac
-          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo 'Tags must be vMAJOR.MINOR.PATCH.' >&2; exit 64;; esac
-          version="${TAG#v}"; case "$version" in *[!0-9.]*|*.*.*.*|.*|*.) exit 64;; esac
-          test "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "orchard-desktop") | .version')" = "$version"
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "orchard-desktop") | .version')"
+          if [ "$EVENT_NAME" = push ]; then
+            case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo 'Tags must be vMAJOR.MINOR.PATCH.' >&2; exit 64;; esac
+            version="${TAG#v}"
+          else
+            version="$package_version"
+          fi
+          case "$version" in *[!0-9.]*|*.*.*.*|.*|*.) echo 'Version must be stable MAJOR.MINOR.PATCH.' >&2; exit 64;; esac
+          test "$package_version" = "$version"
+          test "$(jq -r '.version' crates/orchard-desktop/tauri.conf.json)" = "$version"
+          printf 'ORCHARD_RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
       - name: Set up release tools
         run: |
           rustup show active-toolchain | grep -q '^1.94.0'
@@ -44,36 +58,57 @@ jobs:
           npm --prefix ui ci
           (cd ui && npx playwright install chromium)
           npm --prefix ui run test:browser
-          cargo test --workspace --locked
+          cargo test --release --workspace --locked
       - name: Import Developer ID certificate
+        if: github.event_name == 'push'
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           test -n "$APPLE_CERTIFICATE_P12"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$KEYCHAIN_PASSWORD"
           certificate_path="$RUNNER_TEMP/developer-id.p12"; keychain_path="$RUNNER_TEMP/orchard-signing.keychain-db"
-          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$certificate_path"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 -D > "$certificate_path"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"; security set-keychain-settings -lut 21600 "$keychain_path"; security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
           security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security list-keychain -d user -s "$keychain_path"; security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
-      - name: Build, sign, and notarize
+      - name: Build app
+        run: ORCHARD_VERSION="$ORCHARD_RELEASE_VERSION" scripts/package-macos-app.sh dist/Orchard.app
+      - name: Package unsigned preflight artifact
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          artifact="Orchard-${ORCHARD_RELEASE_VERSION}-UNSIGNED-macos-arm64.zip"
+          ditto -c -k --keepParent dist/Orchard.app "dist/$artifact"
+          (cd dist && shasum -a 256 "$artifact" > "$artifact.sha256")
+      - name: Upload unsigned preflight artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: orchard-unsigned-preflight-${{ github.sha }}
+          path: |
+            dist/Orchard-*-UNSIGNED-macos-arm64.zip
+            dist/Orchard-*-UNSIGNED-macos-arm64.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+      - name: Sign, notarize, and package release
+        if: github.event_name == 'push'
         env:
-          TAG: ${{ github.ref_name }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
-          ORCHARD_VERSION="${TAG#v}" scripts/package-macos-app.sh dist/Orchard.app
           scripts/sign-macos-app.sh dist/Orchard.app
-          ditto -c -k --keepParent dist/Orchard.app "dist/Orchard-${TAG#v}-macos-arm64.zip"
-          (cd dist && shasum -a 256 "Orchard-${TAG#v}-macos-arm64.zip" > "Orchard-${TAG#v}-macos-arm64.zip.sha256")
-      - name: Publish GitHub release
+          ditto -c -k --keepParent dist/Orchard.app "dist/Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip"
+          (cd dist && shasum -a 256 "Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip" > "Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip.sha256")
+      - name: Create draft GitHub release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" "dist/Orchard-${TAG#v}-macos-arm64.zip" "dist/Orchard-${TAG#v}-macos-arm64.zip.sha256" --title "Orchard ${TAG#v}" --generate-notes
+        run: gh release create "$TAG" "dist/Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip" "dist/Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip.sha256" --draft --title "Orchard $ORCHARD_RELEASE_VERSION" --generate-notes
       - name: Remove signing material
         if: always()
         run: |

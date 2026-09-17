@@ -1,9 +1,28 @@
-# Orchard Workspace
+# Orchard
 
-Orchard is a local web workspace for coordinating people and already-running
-agents through shared mail, Git repositories, and Beads task stores. The
-`orchard` executable serves the browser UI and authenticated HTTP/MCP endpoints
-on loopback. It does not launch or authenticate an agent or provider.
+Orchard is a macOS menu bar workspace for coordinating people and already-running
+agents through shared mail, Git repositories, and Beads task stores. It serves
+its browser UI and authenticated HTTP/MCP endpoints locally. Orchard does not
+launch or authenticate an agent or provider.
+
+## Install on macOS
+
+Orchard supports Apple Silicon Macs running macOS 13 or newer.
+
+The first public release is being prepared; there is no signed download yet.
+When a release is published:
+
+1. Download `Orchard-<version>-macos-arm64.zip` and its `.sha256` file from the
+   [latest GitHub Release](https://github.com/algonormative/orchard-workspace/releases/latest).
+2. Optionally verify the download with
+   `shasum -a 256 -c Orchard-<version>-macos-arm64.zip.sha256`.
+3. Open the ZIP and drag `Orchard.app` to Applications.
+4. Open Orchard from Applications. It appears in the menu bar rather than the
+   Dock; use its menu to open the workspace.
+
+Public builds will be signed with a Developer ID certificate, notarized by
+Apple, and carry a stapled notarization ticket. Orchard stores its default data
+in `~/Library/Application Support/Orchard`.
 
 ## Development
 
@@ -28,7 +47,20 @@ The finished package has no runtime dependency on Node, Python, Git, a provider
 CLI, or `PATH`. Rust/Cargo 1.94.0 is pinned in `rust-toolchain.toml`. The approved
 `br` executable is resolved relative to `orchard` as `resources/bin/br`.
 
-## Portable package
+## Release packages
+
+To build an unsigned Apple Silicon app locally:
+
+```sh
+CARGO_TARGET_DIR=/private/tmp/orchard-ux-target \
+  CARGO_INCREMENTAL=0 \
+  ORCHARD_VERSION=0.1.0 scripts/package-macos-app.sh
+```
+
+Signing, notarization, GitHub Release setup, and the first-release checklist are
+documented in [docs/packaging.md](docs/packaging.md).
+
+The server-only package remains available for development and headless use:
 
 ```sh
 scripts/package-server.sh
@@ -37,12 +69,7 @@ scripts/package-server.sh
 The script builds `dist/orchard-server/` with the executable, approved task
 binary, MIT license, and third-party notices. It rebuilds the UI and verifies
 the complete vendored Orchard Mail file set and hashes before compiling. The
-package is a local build artifact; signing, notarization, and publication are
-outside this repository's current evidence.
-
-To build an unsigned Apple Silicon app, run
-`ORCHARD_VERSION=0.1.0 scripts/package-macos-app.sh`. Release signing,
-notarization, and update configuration are in [docs/packaging.md](docs/packaging.md).
+server package is an unsigned local build artifact.
 
 Launch a portable package with an external data directory:
 

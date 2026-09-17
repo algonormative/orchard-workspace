@@ -1,8 +1,9 @@
 # Local verification — 2026-09-15
 
-This is a local macOS Apple Silicon MVP, with a Rust server and browser UI.
-The owner superseded the native Tauri/tray design with web delivery. No native
-application, signed installer, remote release, or provider-backed test is claimed.
+This began as a local macOS Apple Silicon MVP with a Rust server and browser UI.
+The current product also has a native menu bar shell. The evidence below is
+historical and scoped by date; it does not claim a signed, notarized, published,
+or clean-machine-tested release until those checks are recorded here.
 
 ## Independently checked
 

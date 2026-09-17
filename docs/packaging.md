@@ -1,4 +1,61 @@
-# Portable server packaging
+# Packaging and releases
+
+## Public macOS release
+
+The first public release is being prepared; no signed download exists yet.
+Public releases will provide a signed and notarized Apple Silicon app as
+`Orchard-MAJOR.MINOR.PATCH-macos-arm64.zip`. A user can unzip it, move
+`Orchard.app` to Applications, and launch it normally on macOS 13 or newer. The
+app runs in the menu bar, so it does not create a Dock icon or a main window at
+launch.
+
+The release workflow runs on GitHub's standard `macos-14` Apple Silicon runner.
+It uses a release-only Cargo target tree at `/private/tmp/orchard-ux-target`,
+with incremental compilation disabled, to stay within the hosted runner's disk
+limit. It builds and tests only locked dependency graphs. Automated tests must
+not call provider or other metered services.
+
+Before the first release of `algonormative/orchard-workspace`:
+
+1. Set the Actions repository variable `ORCHARD_UPDATE_REPOSITORY` to
+   `algonormative/orchard-workspace`. The value is embedded in the app's manual
+   update check and the workflow rejects a mismatch with the running repository.
+2. Run the workflow manually. This executes the tests and clean-runner package
+   build without signing, then retains an explicitly `UNSIGNED` ZIP as a
+   seven-day Actions artifact. It does not create a GitHub Release.
+3. Export a Developer ID Application certificate as a password-protected `.p12`,
+   base64-encode the file, and add the result as `APPLE_CERTIFICATE_P12`.
+   An Apple Development identity cannot sign a public direct-download release.
+4. Add `APPLE_CERTIFICATE_PASSWORD`, a new ephemeral `KEYCHAIN_PASSWORD`, the
+   complete `APPLE_SIGNING_IDENTITY` shown by `security find-identity -v -p
+   codesigning`, `APPLE_ID`, `APPLE_TEAM_ID`, and an
+   `APPLE_APP_SPECIFIC_PASSWORD` as Actions secrets.
+5. Confirm `0.1.0` matches the version in
+   `crates/orchard-desktop/Cargo.toml` and
+   `crates/orchard-desktop/tauri.conf.json`.
+6. When the exact release commit is ready, create and push the annotated tag
+   `v0.1.0`.
+
+The tag starts `.github/workflows/macos-release.yml`. The workflow validates the
+tag and repository, runs the browser and release-mode Rust tests, imports the
+certificate into a temporary keychain, builds the app, signs its nested `br`
+binary and app bundle with hardened runtime and a secure timestamp, notarizes a
+temporary ZIP, staples and validates the ticket, and assesses the app with
+Gatekeeper. Only then does it create a draft GitHub Release with the distribution
+ZIP and checksum. It removes temporary signing material even when a step fails.
+
+Download both draft assets on a separate compatible Mac while authenticated to
+GitHub. Verify the checksum, install the app in Applications, launch it, create
+or open a workspace, quit from the menu, and reopen it. Publish the draft only
+after that check passes. CI signing and Gatekeeper assessment do not prove the
+complete interactive flow on another Mac, and an unsigned preflight artifact
+must never be published as a release.
+
+Do not reuse a version or move a published tag. For a later release, update both
+desktop version files, commit the change, and tag that exact commit with the
+matching `vMAJOR.MINOR.PATCH` tag.
+
+## Portable server package
 
 `scripts/package-server.sh [destination]` creates a self-contained directory.
 A relative destination is resolved from the caller's working directory before
@@ -57,14 +114,7 @@ staples the accepted ticket. It requires a Developer ID Application identity,
 `APPLE_ID`, `APPLE_TEAM_ID`, and an app-specific password; it cannot create
 those credentials.
 
-The tagged `vMAJOR.MINOR.PATCH` workflow builds, signs, notarizes, staples, and
-publishes `Orchard-MAJOR.MINOR.PATCH-macos-arm64.zip` plus SHA-256 using GitHub
-Release. Before enabling it, set the repository variable
-`ORCHARD_UPDATE_REPOSITORY` to the exact `owner/repository`, and provide
-`APPLE_CERTIFICATE_P12` (base64), `APPLE_CERTIFICATE_PASSWORD`,
-`KEYCHAIN_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and
-`APPLE_APP_SPECIFIC_PASSWORD`. This checkout has no Git remote; no repository
-is assumed or created. The workflow verifies that the `macos-14` runner is
+The tagged `vMAJOR.MINOR.PATCH` workflow verifies that its `macos-14` runner is
 Apple Silicon before it builds an `arm64` asset.
 
 Updates are checked only when the user invokes the menu action. A distribution
