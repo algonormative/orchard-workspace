@@ -42,6 +42,7 @@ struct DesktopState {
     shutdown: Mutex<ShutdownState>,
     base_url: String,
     update_check_in_flight: AtomicBool,
+    applied_menu_entries: Mutex<Vec<WorkspaceMenuEntry>>,
 }
 
 struct ShutdownState {
@@ -137,6 +138,7 @@ fn main() {
                 }),
                 base_url,
                 update_check_in_flight: AtomicBool::new(false),
+                applied_menu_entries: Mutex::new(Vec::new()),
             });
             app.manage(state.clone());
             install_tray(app.handle(), &state)?;
@@ -250,8 +252,26 @@ fn settings_path(id: &str) -> String {
     format!("{}/settings", workspace_path(id))
 }
 
+fn pending_menu_snapshot(
+    previous: &[WorkspaceMenuEntry],
+    current: Result<Vec<WorkspaceMenuEntry>, String>,
+) -> Option<Vec<WorkspaceMenuEntry>> {
+    current.ok().filter(|current| current != previous)
+}
+
+fn record_applied_menu(
+    previous: &mut Vec<WorkspaceMenuEntry>,
+    candidate: Vec<WorkspaceMenuEntry>,
+    set_succeeded: bool,
+) {
+    if set_succeeded {
+        *previous = candidate;
+    }
+}
+
 fn install_tray<R: Runtime>(app: &AppHandle<R>, state: &Arc<DesktopState>) -> tauri::Result<()> {
-    let menu = build_menu(app, state)?;
+    let entries = workspace_entries(&state.host).unwrap_or_default();
+    let menu = build_menu(app, &entries)?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(tray_icon())
         .icon_as_template(true)
@@ -259,11 +279,14 @@ fn install_tray<R: Runtime>(app: &AppHandle<R>, state: &Arc<DesktopState>) -> ta
         .menu(&menu)
         .show_menu_on_left_click(true)
         .build(app)?;
+    *state.applied_menu_entries.lock().unwrap() = entries;
     Ok(())
 }
 
-fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &DesktopState) -> tauri::Result<Menu<R>> {
-    let entries = workspace_entries(&state.host).unwrap_or_default();
+fn build_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    entries: &[WorkspaceMenuEntry],
+) -> tauri::Result<Menu<R>> {
     let open = MenuItem::with_id(app, "open", "Open Orchard", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let workspaces = Submenu::new(app, "Workspaces", true)?;
@@ -279,7 +302,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &DesktopState) -> tauri::Re
         )?;
         workspaces.append(&create)?;
     } else {
-        for entry in &entries {
+        for entry in entries {
             let open_id = format!("workspace:{}", entry.id);
             let settings_id = format!("settings:{}", entry.id);
             workspaces.append(&MenuItem::with_id(
@@ -344,12 +367,23 @@ fn spawn_menu_refresh<R: Runtime>(app: AppHandle<R>, state: Arc<DesktopState>) {
             let state_for_main = state.clone();
             if app
                 .run_on_main_thread(move || {
-                    if let (Some(tray), Ok(menu)) = (
+                    let candidate = {
+                        let previous = state_for_main.applied_menu_entries.lock().unwrap();
+                        pending_menu_snapshot(&previous, workspace_entries(&state_for_main.host))
+                    };
+                    let Some(candidate) = candidate else { return };
+                    let set_succeeded = match (
                         app_for_main.tray_by_id(TRAY_ID),
-                        build_menu(&app_for_main, &state_for_main),
+                        build_menu(&app_for_main, &candidate),
                     ) {
-                        let _ = tray.set_menu(Some(menu));
-                    }
+                        (Some(tray), Ok(menu)) => tray.set_menu(Some(menu)).is_ok(),
+                        _ => false,
+                    };
+                    record_applied_menu(
+                        &mut state_for_main.applied_menu_entries.lock().unwrap(),
+                        candidate,
+                        set_succeeded,
+                    );
                 })
                 .is_err()
             {
@@ -590,5 +624,45 @@ mod tests {
         assert_eq!(state.phase, ShutdownPhase::Stopping);
         assert!(state.begin().is_none());
         assert_eq!(state.phase, ShutdownPhase::Stopping);
+    }
+
+    #[test]
+    fn unchanged_workspace_snapshot_does_not_replace_native_menu() {
+        let entries = vec![WorkspaceMenuEntry {
+            id: "workspace-one".to_owned(),
+            name: "One".to_owned(),
+            root: PathBuf::from("/tmp/one"),
+        }];
+        assert_eq!(pending_menu_snapshot(&entries, Ok(entries.clone())), None);
+    }
+
+    #[test]
+    fn changed_workspace_snapshot_replaces_native_menu() {
+        let previous = vec![];
+        let current = vec![WorkspaceMenuEntry {
+            id: "workspace-one".to_owned(),
+            name: "One".to_owned(),
+            root: PathBuf::from("/tmp/one"),
+        }];
+        assert_eq!(
+            pending_menu_snapshot(&previous, Ok(current.clone())),
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn failed_read_or_native_set_preserves_applied_snapshot() {
+        let entry = WorkspaceMenuEntry {
+            id: "workspace-one".to_owned(),
+            name: "One".to_owned(),
+            root: PathBuf::from("/tmp/one"),
+        };
+        let mut applied = vec![entry.clone()];
+        assert_eq!(
+            pending_menu_snapshot(&applied, Err("read failed".to_owned())),
+            None
+        );
+        record_applied_menu(&mut applied, Vec::new(), false);
+        assert_eq!(applied, vec![entry]);
     }
 }
